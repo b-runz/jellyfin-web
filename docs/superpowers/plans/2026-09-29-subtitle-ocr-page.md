@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add a `subtitleocr` React page to jellyfin-web, reached from a new button on the movie details page, that drives the server's bitmap subtitle OCR job and prompts the administrator only for unknown glyphs and uncertain corrections. Also expose the server's new burned-in subtitle settings (on/off, font size, outline width) on the dashboard's Transcoding page, so the SRTs this page produces render at a size the administrator can control.
+**Goal:** Add a `subtitleocr` React page to jellyfin-web, reached from a new button on the movie details page, that drives the server's scoring-pipeline OCR job and prompts the administrator only for lines the pipeline is still uncertain about after its own adjudication step. Also expose the server's new burned-in subtitle settings (on/off, font size, outline width) on the dashboard's Transcoding page, so the SRTs this page produces render at a size the administrator can control.
 
-**Architecture:** A feature folder `src/apps/legacy/features/subtitleOcr/` holds typed react-query hooks over the `/SubtitleOcr` routes, pure utilities (eligibility, word diff, review splitting) with vitest tests, and MUI components for each phase. A page file `src/apps/legacy/routes/subtitleOcr.tsx` reads `itemId`, `serverId` and `jobId` from the query string and renders the component matching the job state. The legacy details page controller gains one button that navigates to the route. Separately, `src/apps/dashboard/routes/playback/transcoding.tsx` gains a "Burned-in subtitles" block bound to three `EncodingOptions` properties added by the server branch `feature/subtitle-burn-in-engine`, typed through a small local extension of the SDK's `EncodingOptions`.
+**Architecture:** A feature folder `src/apps/legacy/features/subtitleOcr/` holds typed react-query hooks over the `/SubtitleOcr` routes, pure utilities (eligibility, word diff, review splitting, name-list parsing) with vitest tests, and MUI components for each phase. A page file `src/apps/legacy/routes/subtitleOcr.tsx` reads `itemId`, `serverId` and `jobId` from the query string and renders the component matching the job state. Review data comes back as one flat list of scored lines with a `Certainty` of `certain`, `adjudicated` or `uncertain`; only `uncertain` lines need a decision, each shown with its crop image (fetched as an authenticated binary request, not embedded in the JSON) and scored candidate buttons. The legacy details page controller gains one button that navigates to the route. Separately, `src/apps/dashboard/routes/playback/transcoding.tsx` gains a "Burned-in subtitles" block bound to three `EncodingOptions` properties added by the server branch `feature/subtitle-burn-in-engine`, typed through a small local extension of the SDK's `EncodingOptions`.
 
 **Tech Stack:** React 18, react-router-dom 6.30 (`useSearchParams`, `useNavigate`, `useBlocker`), `@tanstack/react-query` 5, `@jellyfin/sdk` `Api` (axios) via `hooks/useApi`, MUI 6 (`@mui/material`), vitest 3 with jsdom, ESLint with `@stylistic` (4-space indent, single quotes, no trailing commas).
 
@@ -18,7 +18,8 @@
 - Type check with `npm run build:check` (`tsc --noEmit`). Tests with `npx vitest run <path>`.
 - MUI components are imported per file: `import Button from '@mui/material/Button';`. Icons from `@mui/icons-material/<Name>`.
 - Translations: add keys to `src/strings/en-us.json` only, inserted alphabetically among the existing `Subtitle...` keys. Never edit other language files.
-- Server payloads are PascalCase (`Id`, `State`, `CuesDone`). Type names in `types/` mirror the server plan records exactly.
+- Server payloads are PascalCase (`Id`, `State`, `Stage`, `ChosenText`, `Certainty`). Type names in `types/` mirror the server scoring-pipeline plan's C# records exactly (Task 9/10 of `jellyfin/docs/superpowers/plans/2026-09-29-subtitle-ocr-scoring-pipeline.md`).
+- `GET /SubtitleOcr/Jobs/{id}/Crops/{index}` returns raw `image/png`, not JSON. It is admin-gated, so it must be fetched as an authenticated binary request (`responseType: 'blob'`) and shown through `URL.createObjectURL`, never a bare `<img src="...">`, which would carry no `Authorization` header and 401.
 - Every server route lives under `${api.basePath}/SubtitleOcr` and needs the `Authorization: api.authorizationHeader` header, as `src/utils/bitrateTest.ts` does.
 - The job id URL parameter is `jobId`; item and server parameters are `itemId` and `serverId`.
 - Commit after every task with the trailer `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`.
@@ -27,8 +28,8 @@
 
 1. **A media source with a PGS track and an external SRT whose `Language` differs only in case (`ENG` vs `eng`).** Expected: the track is not eligible. Test in Task 1.
 2. **A cue where the correction only inserts a word, or only deletes one (`"I am here"` to `"I am not here"`).** Expected: `wordDiff` yields an `added` or `removed` segment with no crash and `changedWords` counts one word. Test in Task 2.
-3. **A review whose `Edits` is empty and `DetectedNames` has one uncertain name.** Expected: `autoAccept` is false and the uncertainty prompt shows just the name card. Test in Task 3.
-4. **A glyph answer request that times out after the server already applied it.** Expected: the page refetches the glyph, sees a different `ShapeId`, drops the pending answer and shows the next glyph, without a duplicate `Learn`. Test in Task 8 (a unit test of the pure `resolveAnswerOutcome` decision helper).
+3. **A review whose lines are all `certain` or `adjudicated` except one `uncertain` line.** Expected: `splitReview` reports `autoAccept: false` with exactly that one line in `uncertainLines`, and the certain/adjudicated ones do not require any decision. Test in Task 3.
+4. **A movie-length review (hundreds of `certain` lines, a handful `uncertain`).** Expected: crop images are fetched only for the `uncertain` lines, never for the collapsed certain/adjudicated list, so opening the review does not trigger hundreds of image requests. Guaranteed by construction in Task 8: `ResolvedLinesList` never renders `LineCropImage`, only `UncertainLineCard` (rendered once per `split.uncertainLines` entry) does, and `useCropImage` is `enabled` only when both `jobId` and `index` are given; verified by the manual pass with a full-length track.
 5. **Rejoining via URL a job the server no longer knows (404 on `GET /Jobs/{id}`).** Expected: the page removes `jobId` from the URL and starts again through `POST /Jobs`, which returns the running job if there is one. Test in Task 10 (unit test of `nextStepAfterJobError`).
 
 ---
@@ -44,7 +45,7 @@
 **Interfaces:**
 - Consumes: `BaseItemDto`, `MediaSourceInfo`, `MediaStream` from `@jellyfin/sdk/lib/generated-client`.
 - Produces:
-  - all types listed in Step 3 (`JobState`, `OcrJob`, `GlyphQuestion`, `StartJobRequest`, `GlyphAnswer`, `ReviewCue`, `ReviewEdit`, `DetectedName`, `Review`, `AcceptRequest`, `AcceptResult`, `EligibleTrack`)
+  - all types listed in Step 3 (`JobState`, `OcrJob`, `StartJobRequest`, `ReviewCandidate`, `Adjudication`, `Certainty`, `ReviewLine`, `ReviewStats`, `Review`, `ReviewDecision`, `AcceptRequest`, `AcceptResult`, `EligibleTrack`)
   - constants `QUERY_KEY`, `PROGRESS_STATES`, `POLL_INTERVAL_MS`, `POLL_BACKOFF_MAX_MS`, `ROUTE_PATH`, `ITEM_ID_PARAM`, `SERVER_ID_PARAM`, `JOB_ID_PARAM`
   - `eligibleTracks(item: Pick<BaseItemDto, 'MediaSources'>): EligibleTrack[]`
 
@@ -176,16 +177,18 @@ Expected: FAIL with "Failed to resolve import './eligibleTracks'".
 `src/apps/legacy/features/subtitleOcr/types/index.ts`:
 
 ```ts
-/** Server job states, see the server plan Task 9 (`SubtitleOcrJobState`). */
+/** Server job states, see the server scoring-pipeline plan Task 10 (`SubtitleOcrJobState`). */
 export type JobState =
     | 'Extracting'
+    | 'Uploading'
     | 'Recognising'
-    | 'AwaitingGlyph'
-    | 'Correcting'
     | 'AwaitingReview'
     | 'Done'
     | 'Failed'
     | 'Cancelled';
+
+/** Sub-stage of `Recognising`, empty outside it. One of 'ocr', 'candidates', 'scoring', 'adjudicating'. */
+export type JobStage = 'ocr' | 'candidates' | 'scoring' | 'adjudicating' | '';
 
 export interface OcrJob {
     Id: string;
@@ -193,25 +196,11 @@ export interface OcrJob {
     MediaSourceId: string;
     StreamIndex: number;
     State: JobState;
-    CuesDone: number;
-    CuesTotal: number;
-    QuestionsRemaining: number;
+    Stage: JobStage;
+    Done: number;
+    Total: number;
     Error?: string | null;
     Warning?: string | null;
-}
-
-export interface GlyphQuestion {
-    ShapeId: string;
-    CueIndex: number;
-    LetterPngBase64: string;
-    CuePngBase64: string;
-    Left: number;
-    Top: number;
-    Width: number;
-    Height: number;
-    Candidates: string[];
-    Remaining: number;
-    Occurrences: number;
 }
 
 export interface StartJobRequest {
@@ -220,44 +209,55 @@ export interface StartJobRequest {
     StreamIndex: number;
 }
 
-export interface GlyphAnswer {
-    ShapeId: string;
-    Text?: string | null;
-    Italic: boolean;
-    Skip: boolean;
+/** Certainty verdict the server's scoring pipeline assigns to a line. */
+export type Certainty = 'certain' | 'adjudicated' | 'uncertain';
+
+export interface ReviewCandidate {
+    Text: string;
+    Score: number | null;
 }
 
-export interface ReviewCue {
+export interface Adjudication {
+    ModelId: string;
+    Options: string[];
+    Picked: number | null;
+}
+
+export interface ReviewLine {
     Index: number;
     Start: string;
     End: string;
-    Text: string;
+    OcrText: string;
+    ChosenText: string;
+    Certainty: Certainty;
+    Margin: number;
+    Candidates: ReviewCandidate[];
+    Adjudication?: Adjudication | null;
 }
 
-export interface ReviewEdit {
-    Id: number;
-    CueIndex: number;
-    Original: string;
-    Corrected: string;
-    Reason: string;
-    Certain: boolean;
-}
-
-export interface DetectedName {
-    Name: string;
-    CueIndex: number;
-    Certain: boolean;
+export interface ReviewStats {
+    CuesIn: number;
+    CuesDropped: number;
+    LinesFlagged: number;
+    LmCalls: number;
+    VlmCalls: number;
+    LmFailed: boolean;
+    VlmFailed: boolean;
 }
 
 export interface Review {
-    Cues: ReviewCue[];
-    Edits: ReviewEdit[];
-    DetectedNames: DetectedName[];
-    CorrectorError?: string | null;
+    Lines: ReviewLine[];
+    Stats: ReviewStats;
+    WeightsVersion: string;
+}
+
+export interface ReviewDecision {
+    Index: number;
+    Text: string;
 }
 
 export interface AcceptRequest {
-    RejectedEditIds: number[];
+    Decisions: ReviewDecision[];
     Names: string[];
     NeverAsk: string[];
 }
@@ -291,7 +291,7 @@ export const SERVER_ID_PARAM = 'serverId';
 export const JOB_ID_PARAM = 'jobId';
 
 /** States in which the server is working and the page polls. */
-export const PROGRESS_STATES: JobState[] = [ 'Extracting', 'Recognising', 'Correcting' ];
+export const PROGRESS_STATES: JobState[] = [ 'Extracting', 'Uploading', 'Recognising' ];
 
 export const POLL_INTERVAL_MS = 1000;
 export const POLL_BACKOFF_MAX_MS = 10000;
@@ -610,22 +610,20 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 ---
 
-### Task 3: Review splitting and accept request builder
+### Task 3: Review splitting, accept request builder and names parsing
 
 **Files:**
 - Create: `src/apps/legacy/features/subtitleOcr/utils/review.ts`
 - Test: `src/apps/legacy/features/subtitleOcr/utils/review.test.ts`
 
 **Interfaces:**
-- Consumes: `Review`, `ReviewEdit`, `DetectedName`, `AcceptRequest` (Task 1), `changedWords` (Task 2).
+- Consumes: `Review`, `ReviewLine`, `AcceptRequest` (Task 1).
 - Produces:
-  - `interface SplitReview { certainEdits: ReviewEdit[]; uncertainEdits: ReviewEdit[]; certainNames: DetectedName[]; uncertainNames: DetectedName[]; autoAccept: boolean }`
+  - `interface SplitReview { resolvedLines: ReviewLine[]; uncertainLines: ReviewLine[]; autoAccept: boolean }`
   - `splitReview(review: Review): SplitReview`
-  - `type EditDecision = 'accept' | 'reject'`
-  - `interface ReviewAnswers { edits: Record<number, EditDecision>; neverAsk: Record<number, boolean>; names: Record<string, boolean> }`
-  - `isReviewComplete(split: SplitReview, answers: ReviewAnswers): boolean`
-  - `buildAcceptRequest(split: SplitReview, answers: ReviewAnswers): AcceptRequest`
-  - `emptyAnswers(): ReviewAnswers`
+  - `isReviewComplete(split: SplitReview, decisions: Record<number, string>): boolean`
+  - `buildAcceptRequest(split: SplitReview, decisions: Record<number, string>, namesText: string): AcceptRequest`
+  - `parseNames(text: string): string[]`
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -634,109 +632,100 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ```ts
 import { describe, expect, it } from 'vitest';
 
-import type { DetectedName, Review, ReviewEdit } from '../types';
-import { buildAcceptRequest, emptyAnswers, isReviewComplete, splitReview } from './review';
+import type { Review, ReviewLine } from '../types';
+import { buildAcceptRequest, isReviewComplete, parseNames, splitReview } from './review';
 
-const edit = (id: number, certain: boolean, original = 'l am', corrected = 'I am'): ReviewEdit => ({
-    Id: id,
-    CueIndex: id,
-    Original: original,
-    Corrected: corrected,
-    Reason: 'ocr',
-    Certain: certain
+const line = (index: number, certainty: ReviewLine['Certainty'], ocrText = 'l am here', chosenText = 'I am here'): ReviewLine => ({
+    Index: index,
+    Start: '00:00:01.000',
+    End: '00:00:02.000',
+    OcrText: ocrText,
+    ChosenText: chosenText,
+    Certainty: certainty,
+    Margin: certainty === 'uncertain' ? 0.1 : 5,
+    Candidates: [ { Text: ocrText, Score: 0.4 }, { Text: chosenText, Score: 0.9 } ]
 });
 
-const name = (value: string, certain: boolean): DetectedName => ({ Name: value, CueIndex: 0, Certain: certain });
-
-const review = (edits: ReviewEdit[], names: DetectedName[]): Review => ({
-    Cues: [],
-    Edits: edits,
-    DetectedNames: names,
-    CorrectorError: null
+const review = (lines: ReviewLine[]): Review => ({
+    Lines: lines,
+    Stats: { CuesIn: lines.length, CuesDropped: 0, LinesFlagged: 0, LmCalls: 0, VlmCalls: 0, LmFailed: false, VlmFailed: false },
+    WeightsVersion: 'test'
 });
 
 describe('splitReview', () => {
-    it('auto-accepts when every edit and name is certain', () => {
-        const split = splitReview(review([ edit(1, true) ], [ name('Anakin', true) ]));
+    it('auto-accepts when every line is certain or adjudicated', () => {
+        const split = splitReview(review([ line(0, 'certain'), line(1, 'adjudicated') ]));
 
         expect(split.autoAccept).toBe(true);
-        expect(split.certainEdits).toHaveLength(1);
-        expect(split.uncertainEdits).toHaveLength(0);
-        expect(split.certainNames.map(n => n.Name)).toEqual([ 'Anakin' ]);
+        expect(split.resolvedLines).toHaveLength(2);
+        expect(split.uncertainLines).toHaveLength(0);
     });
 
     it('auto-accepts an empty review', () => {
-        expect(splitReview(review([], [])).autoAccept).toBe(true);
+        expect(splitReview(review([])).autoAccept).toBe(true);
     });
 
-    it('does not auto-accept when only an uncertain name is present', () => {
-        const split = splitReview(review([], [ name('Padme', false) ]));
+    it('does not auto-accept when one line is uncertain', () => {
+        const split = splitReview(review([ line(0, 'certain'), line(1, 'uncertain') ]));
 
         expect(split.autoAccept).toBe(false);
-        expect(split.uncertainNames.map(n => n.Name)).toEqual([ 'Padme' ]);
-    });
-
-    it('does not auto-accept when an uncertain edit is present', () => {
-        expect(splitReview(review([ edit(1, true), edit(2, false) ], [])).autoAccept).toBe(false);
+        expect(split.uncertainLines.map(l => l.Index)).toEqual([ 1 ]);
+        expect(split.resolvedLines.map(l => l.Index)).toEqual([ 0 ]);
     });
 });
 
 describe('isReviewComplete', () => {
-    it('requires an answer for every uncertain edit and name', () => {
-        const split = splitReview(review([ edit(1, false), edit(2, false) ], [ name('Padme', false) ]));
-        const answers = emptyAnswers();
+    it('requires a decision for every uncertain line only', () => {
+        const split = splitReview(review([ line(0, 'certain'), line(1, 'uncertain'), line(2, 'uncertain') ]));
 
-        expect(isReviewComplete(split, answers)).toBe(false);
-
-        answers.edits[1] = 'accept';
-        answers.edits[2] = 'reject';
-        expect(isReviewComplete(split, answers)).toBe(false);
-
-        answers.names.Padme = true;
-        expect(isReviewComplete(split, answers)).toBe(true);
+        expect(isReviewComplete(split, {})).toBe(false);
+        expect(isReviewComplete(split, { 1: 'I am here' })).toBe(false);
+        expect(isReviewComplete(split, { 1: 'I am here', 2: 'l am here' })).toBe(true);
     });
 
     it('is complete immediately when nothing is uncertain', () => {
-        expect(isReviewComplete(splitReview(review([ edit(1, true) ], [])), emptyAnswers())).toBe(true);
+        expect(isReviewComplete(splitReview(review([ line(0, 'certain') ])), {})).toBe(true);
     });
 });
 
 describe('buildAcceptRequest', () => {
-    it('sends no rejections and all certain names on auto-accept', () => {
-        const split = splitReview(review([ edit(1, true) ], [ name('Anakin', true) ]));
+    it('sends no decisions and no names on auto-accept', () => {
+        const split = splitReview(review([ line(0, 'certain') ]));
 
-        expect(buildAcceptRequest(split, emptyAnswers())).toEqual({
-            RejectedEditIds: [],
-            Names: [ 'Anakin' ],
+        expect(buildAcceptRequest(split, {}, '')).toEqual({
+            Decisions: [],
+            Names: [],
             NeverAsk: []
         });
     });
 
-    it('collects rejected ids, accepted uncertain names and never-ask words', () => {
-        const split = splitReview(review(
-            [ edit(1, false, 'gonna go', 'going to go'), edit(2, false), edit(3, true) ],
-            [ name('Anakin', true), name('Padme', false), name('Rn', false) ]
-        ));
-        const answers = emptyAnswers();
-        answers.edits[1] = 'reject';
-        answers.neverAsk[1] = true;
-        answers.edits[2] = 'accept';
-        answers.names.Padme = true;
-        answers.names.Rn = false;
+    it('sends one decision per uncertain line and parsed names', () => {
+        const split = splitReview(review([ line(0, 'certain'), line(1, 'uncertain'), line(2, 'uncertain') ]));
 
-        expect(buildAcceptRequest(split, answers)).toEqual({
-            RejectedEditIds: [ 1 ],
+        const request = buildAcceptRequest(split, { 1: 'I am here', 2: 'l am here' }, 'Anakin,  Padme ,Anakin');
+
+        expect(request).toEqual({
+            Decisions: [ { Index: 1, Text: 'I am here' }, { Index: 2, Text: 'l am here' } ],
             Names: [ 'Anakin', 'Padme' ],
-            NeverAsk: [ 'gonna' ]
+            NeverAsk: []
         });
     });
 
-    it('does not add never-ask words for a rejected edit when the box is unchecked', () => {
-        const split = splitReview(review([ edit(1, false, 'gonna', 'going to') ], []));
-        const answers = emptyAnswers();
-        answers.edits[1] = 'reject';
+    it('omits a decision for an uncertain line the user never answered', () => {
+        const split = splitReview(review([ line(0, 'uncertain') ]));
 
-        expect(buildAcceptRequest(split, answers).NeverAsk).toEqual([]);
+        expect(buildAcceptRequest(split, {}, '').Decisions).toEqual([]);
+    });
+});
+
+describe('parseNames', () => {
+    it('trims, deduplicates and drops empty entries', () => {
+        expect(parseNames(' Anakin, Padme ,, Anakin ,')).toEqual([ 'Anakin', 'Padme' ]);
+    });
+
+    it('returns an empty list for blank input', () => {
+        expect(parseNames('')).toEqual([]);
+        expect(parseNames('   ')).toEqual([]);
     });
 });
 ```
@@ -751,83 +740,70 @@ Expected: FAIL with "Failed to resolve import './review'".
 `src/apps/legacy/features/subtitleOcr/utils/review.ts`:
 
 ```ts
-import type { AcceptRequest, DetectedName, Review, ReviewEdit } from '../types';
-import { changedWords } from './wordDiff';
+import type { AcceptRequest, Review, ReviewLine } from '../types';
 
 export interface SplitReview {
-    certainEdits: ReviewEdit[];
-    uncertainEdits: ReviewEdit[];
-    certainNames: DetectedName[];
-    uncertainNames: DetectedName[];
+    /** `certain` and `adjudicated` lines: nothing to ask, listed collapsed for audit. */
+    resolvedLines: ReviewLine[];
+    /** `uncertain` lines: the only ones needing a decision. */
+    uncertainLines: ReviewLine[];
     /** True when there is nothing to ask the user about. */
     autoAccept: boolean;
 }
 
-export type EditDecision = 'accept' | 'reject';
-
-export interface ReviewAnswers {
-    /** Keyed by `ReviewEdit.Id`. */
-    edits: Record<number, EditDecision>;
-    /** Keyed by `ReviewEdit.Id`; true when the rejected edit's words should never be asked about again. */
-    neverAsk: Record<number, boolean>;
-    /** Keyed by `DetectedName.Name`; true when the user confirmed it is a name. */
-    names: Record<string, boolean>;
-}
-
-export const emptyAnswers = (): ReviewAnswers => ({ edits: {}, neverAsk: {}, names: {} });
-
 export const splitReview = (review: Review): SplitReview => {
-    const certainEdits = review.Edits.filter(e => e.Certain);
-    const uncertainEdits = review.Edits.filter(e => !e.Certain);
-    const certainNames = review.DetectedNames.filter(n => n.Certain);
-    const uncertainNames = review.DetectedNames.filter(n => !n.Certain);
+    const resolvedLines = review.Lines.filter(l => l.Certainty !== 'uncertain');
+    const uncertainLines = review.Lines.filter(l => l.Certainty === 'uncertain');
 
-    return {
-        certainEdits,
-        uncertainEdits,
-        certainNames,
-        uncertainNames,
-        autoAccept: uncertainEdits.length === 0 && uncertainNames.length === 0
-    };
+    return { resolvedLines, uncertainLines, autoAccept: uncertainLines.length === 0 };
 };
 
-export const isReviewComplete = (split: SplitReview, answers: ReviewAnswers): boolean =>
-    split.uncertainEdits.every(e => answers.edits[e.Id] !== undefined)
-    && split.uncertainNames.every(n => answers.names[n.Name] !== undefined);
+/** `decisions` is keyed by `ReviewLine.Index`, holding the text the user picked or typed for that line. */
+export const isReviewComplete = (split: SplitReview, decisions: Record<number, string>): boolean =>
+    split.uncertainLines.every(l => decisions[l.Index] !== undefined);
 
-export const buildAcceptRequest = (split: SplitReview, answers: ReviewAnswers): AcceptRequest => {
-    const rejected = split.uncertainEdits.filter(e => answers.edits[e.Id] === 'reject');
+export const buildAcceptRequest = (
+    split: SplitReview,
+    decisions: Record<number, string>,
+    namesText: string
+): AcceptRequest => ({
+    Decisions: split.uncertainLines
+        .filter(l => decisions[l.Index] !== undefined)
+        .map(l => ({ Index: l.Index, Text: decisions[l.Index] })),
+    Names: parseNames(namesText),
+    NeverAsk: []
+});
 
-    const neverAsk = rejected
-        .filter(e => answers.neverAsk[e.Id])
-        .flatMap(e => changedWords(e.Original, e.Corrected));
+/** Comma-separated free text into a deduplicated, trimmed list of names, in first-seen order. */
+export const parseNames = (text: string): string[] => {
+    const seen = new Set<string>();
+    const names: string[] = [];
 
-    const names = [
-        ...split.certainNames.map(n => n.Name),
-        ...split.uncertainNames.filter(n => answers.names[n.Name] === true).map(n => n.Name)
-    ];
+    for (const raw of text.split(',')) {
+        const name = raw.trim();
+        if (name && !seen.has(name)) {
+            seen.add(name);
+            names.push(name);
+        }
+    }
 
-    return {
-        RejectedEditIds: rejected.map(e => e.Id),
-        Names: Array.from(new Set(names)),
-        NeverAsk: Array.from(new Set(neverAsk))
-    };
+    return names;
 };
 ```
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `npx vitest run src/apps/legacy/features/subtitleOcr/utils`
-Expected: PASS, all three utility test files.
+Expected: PASS, all three utility test files (`eligibleTracks`, `wordDiff`, `review`).
 
 - [ ] **Step 5: Lint and commit**
 
 ```bash
 npx eslint src/apps/legacy/features/subtitleOcr
 git add src/apps/legacy/features/subtitleOcr/utils/review.ts src/apps/legacy/features/subtitleOcr/utils/review.test.ts
-git commit -m "Add review splitting and accept request builder for subtitle OCR
+git commit -m "Add review splitting, accept request builder and names parsing
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
 ```
 
 ---
@@ -838,26 +814,24 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 - Create: `src/apps/legacy/features/subtitleOcr/api/request.ts`
 - Create: `src/apps/legacy/features/subtitleOcr/api/useStartJob.ts`
 - Create: `src/apps/legacy/features/subtitleOcr/api/useJob.ts`
-- Create: `src/apps/legacy/features/subtitleOcr/api/useGlyph.ts`
-- Create: `src/apps/legacy/features/subtitleOcr/api/useAnswerGlyph.ts`
 - Create: `src/apps/legacy/features/subtitleOcr/api/useReview.ts`
 - Create: `src/apps/legacy/features/subtitleOcr/api/useAccept.ts`
 - Create: `src/apps/legacy/features/subtitleOcr/api/useCancelJob.ts`
+- Create: `src/apps/legacy/features/subtitleOcr/api/useCropImage.ts`
 - Test: `src/apps/legacy/features/subtitleOcr/api/request.test.ts`
 
 **Interfaces:**
 - Consumes: `Api` from `@jellyfin/sdk` (`api.basePath`, `api.authorizationHeader`, `api.axiosInstance`), `useApi` from `hooks/useApi`, `queryClient` from `utils/query/queryClient`, types and constants from Task 1.
 - Produces:
-  - `ocrRequest<T>(api: Api, method: 'GET' | 'POST' | 'DELETE', path: string, data?: unknown, signal?: AbortSignal): Promise<AxiosResponse<T>>` — `path` is appended to `/SubtitleOcr`.
+  - `ocrRequest<T>(api: Api, method: 'GET' | 'POST' | 'DELETE', path: string, data?: unknown, signal?: AbortSignal, config?: Partial<AxiosRequestConfig>): Promise<AxiosResponse<T>>` — `path` is appended to `/SubtitleOcr`; `config` merges in extra axios options such as `responseType`.
   - `statusOf(error: unknown): number | undefined` — HTTP status of an axios error, else undefined.
-  - `jobQueryKey(jobId)`, `glyphQueryKey(jobId)`, `reviewQueryKey(jobId)`.
+  - `jobQueryKey(jobId)`, `reviewQueryKey(jobId)`, `cropQueryKey(jobId, index)`.
   - `useStartJob(): UseMutationResult<OcrJob, unknown, StartJobRequest>`
   - `useJob(jobId?: string): UseQueryResult<OcrJob>` — polls while in `PROGRESS_STATES`.
-  - `useGlyph(jobId: string | undefined, enabled: boolean): UseQueryResult<GlyphQuestion | null>`
-  - `useAnswerGlyph(jobId?: string): UseMutationResult<void, unknown, GlyphAnswer>`
   - `useReview(jobId: string | undefined, enabled: boolean): UseQueryResult<Review>`
   - `useAccept(jobId?: string): UseMutationResult<AcceptResult, unknown, AcceptRequest>`
   - `useCancelJob(): UseMutationResult<void, unknown, string>` (argument is the job id)
+  - `useCropImage(jobId: string | undefined, index: number | undefined): UseQueryResult<Blob>` — fetches `GET /Jobs/{id}/Crops/{index}` as a binary response; the crop route is admin-gated and returns raw PNG, so it must be fetched with the same `Authorization` header as every other call rather than loaded as a bare `<img src>`.
 
 - [ ] **Step 1: Write the failing test for the request helper**
 
@@ -890,6 +864,26 @@ describe('ocrRequest', () => {
             signal: undefined
         });
     });
+
+    it('merges extra axios config, such as responseType, without dropping the auth header', async () => {
+        const request = vi.fn().mockResolvedValue({ status: 200, data: new Blob() });
+        const api = {
+            basePath: 'https://server',
+            authorizationHeader: 'MediaBrowser Token="t"',
+            axiosInstance: { request }
+        } as unknown as Api;
+
+        await ocrRequest<Blob>(api, 'GET', '/Jobs/j1/Crops/3', undefined, undefined, { responseType: 'blob' });
+
+        expect(request).toHaveBeenCalledWith({
+            method: 'GET',
+            url: 'https://server/SubtitleOcr/Jobs/j1/Crops/3',
+            data: undefined,
+            headers: { Authorization: 'MediaBrowser Token="t"' },
+            signal: undefined,
+            responseType: 'blob'
+        });
+    });
 });
 
 describe('statusOf', () => {
@@ -919,7 +913,7 @@ Expected: FAIL with "Failed to resolve import './request'".
 
 ```ts
 import type { Api } from '@jellyfin/sdk';
-import { type AxiosResponse, isAxiosError } from 'axios';
+import { type AxiosRequestConfig, type AxiosResponse, isAxiosError } from 'axios';
 
 import { QUERY_KEY } from '../constants';
 
@@ -928,14 +922,17 @@ export type OcrMethod = 'GET' | 'POST' | 'DELETE';
 /**
  * Sends a request to a `/SubtitleOcr` route. These routes are not in the generated SDK client,
  * so the SDK's axios instance is used directly with the same authorization header the SDK would send.
+ * `config` merges in extra axios options, such as `responseType: 'blob'` for the crop image route.
  */
 export const ocrRequest = <T>(
     api: Api,
     method: OcrMethod,
     path: string,
     data?: unknown,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    config?: Partial<AxiosRequestConfig>
 ): Promise<AxiosResponse<T>> => api.axiosInstance.request<T>({
+    ...config,
     method,
     url: `${api.basePath}/SubtitleOcr${path}`,
     data,
@@ -948,14 +945,16 @@ export const statusOf = (error: unknown): number | undefined =>
     isAxiosError(error) ? error.response?.status : undefined;
 
 export const jobQueryKey = (jobId?: string) => [ QUERY_KEY, 'Job', jobId ];
-export const glyphQueryKey = (jobId?: string) => [ QUERY_KEY, 'Glyph', jobId ];
 export const reviewQueryKey = (jobId?: string) => [ QUERY_KEY, 'Review', jobId ];
+export const cropQueryKey = (jobId?: string, index?: number) => [ QUERY_KEY, 'Crop', jobId, index ];
 ```
+
+Note: the `headers` spread order matters. `config` is spread first so that a caller cannot accidentally override `method`, `url`, `data`, `headers` or `signal` by passing them in `config`; only genuinely extra options like `responseType` should go there.
 
 - [ ] **Step 4: Run the test to verify it passes**
 
 Run: `npx vitest run src/apps/legacy/features/subtitleOcr/api/request.test.ts`
-Expected: PASS, 3 tests.
+Expected: PASS, 4 tests.
 
 - [ ] **Step 5: Write the hooks**
 
@@ -1021,58 +1020,6 @@ export const useJob = (jobId?: string) => {
             return status !== 404 && failureCount < 3;
         },
         retryDelay: attempt => Math.min(POLL_INTERVAL_MS * 2 ** attempt, POLL_BACKOFF_MAX_MS)
-    });
-};
-```
-
-`src/apps/legacy/features/subtitleOcr/api/useGlyph.ts`:
-
-```ts
-import { useQuery } from '@tanstack/react-query';
-
-import { useApi } from 'hooks/useApi';
-
-import type { GlyphQuestion } from '../types';
-import { glyphQueryKey, ocrRequest } from './request';
-
-/** The glyph question at the head of the server's queue, or null when there is none (HTTP 204). */
-export const useGlyph = (jobId: string | undefined, enabled: boolean) => {
-    const { api } = useApi();
-
-    return useQuery({
-        queryKey: glyphQueryKey(jobId),
-        queryFn: async ({ signal }) => {
-            const response = await ocrRequest<GlyphQuestion | ''>(api!, 'GET', `/Jobs/${jobId}/Glyph`, undefined, signal);
-            return response.status === 204 || !response.data ? null : response.data;
-        },
-        enabled: !!api && !!jobId && enabled,
-        staleTime: 0
-    });
-};
-```
-
-`src/apps/legacy/features/subtitleOcr/api/useAnswerGlyph.ts`:
-
-```ts
-import { useMutation } from '@tanstack/react-query';
-
-import { useApi } from 'hooks/useApi';
-import { queryClient } from 'utils/query/queryClient';
-
-import type { GlyphAnswer } from '../types';
-import { glyphQueryKey, jobQueryKey, ocrRequest } from './request';
-
-export const useAnswerGlyph = (jobId?: string) => {
-    const { api } = useApi();
-
-    return useMutation({
-        mutationFn: async (answer: GlyphAnswer) => {
-            await ocrRequest<void>(api!, 'POST', `/Jobs/${jobId}/Glyph`, answer);
-        },
-        onSettled: () => Promise.all([
-            queryClient.invalidateQueries({ queryKey: glyphQueryKey(jobId) }),
-            queryClient.invalidateQueries({ queryKey: jobQueryKey(jobId) })
-        ])
     });
 };
 ```
@@ -1148,6 +1095,38 @@ export const useCancelJob = () => {
 };
 ```
 
+`src/apps/legacy/features/subtitleOcr/api/useCropImage.ts`:
+
+```ts
+import { useQuery } from '@tanstack/react-query';
+
+import { useApi } from 'hooks/useApi';
+
+import { cropQueryKey, ocrRequest } from './request';
+
+/**
+ * Fetches one line's crop image as a `Blob`. Only enabled when both `jobId` and `index` are given,
+ * so a component only fetches crops for the uncertain lines it actually renders, never eagerly for
+ * every line in the review. The result is cached indefinitely: a crop never changes once generated.
+ */
+export const useCropImage = (jobId: string | undefined, index: number | undefined) => {
+    const { api } = useApi();
+
+    return useQuery({
+        queryKey: cropQueryKey(jobId, index),
+        queryFn: async ({ signal }) => {
+            const response = await ocrRequest<Blob>(
+                api!, 'GET', `/Jobs/${jobId}/Crops/${index}`, undefined, signal, { responseType: 'blob' }
+            );
+            return response.data;
+        },
+        enabled: !!api && !!jobId && index !== undefined,
+        staleTime: Infinity,
+        gcTime: Infinity
+    });
+};
+```
+
 - [ ] **Step 6: Lint and type check**
 
 Run: `npx eslint src/apps/legacy/features/subtitleOcr && npm run build:check`
@@ -1159,7 +1138,7 @@ Expected: no lint output, tsc exits 0. If tsc complains that `refetchInterval`'s
 git add src/apps/legacy/features/subtitleOcr/api
 git commit -m "Add react-query hooks for the subtitle OCR routes
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
 ```
 
 ---
@@ -1212,36 +1191,33 @@ In `src/strings/en-us.json`, insert these keys alphabetically among the existing
 
 ```json
     "ConvertSubtitlesToText": "Convert subtitles to text",
-    "SubtitleOcrAccept": "Accept",
+    "SubtitleOcrAdjudicatedBy": "Confirmed by a vision model",
     "SubtitleOcrAdminRequired": "Administrator access is required to convert subtitles.",
     "SubtitleOcrCancelConversion": "Cancel conversion",
-    "SubtitleOcrChecking": "Checking spelling",
+    "SubtitleOcrCheckingUncertain": "Checking uncertain lines",
     "SubtitleOcrConvert": "Convert",
+    "SubtitleOcrCropLoadFailed": "Could not load this line's image",
     "SubtitleOcrExtracting": "Extracting subtitles",
     "SubtitleOcrFailed": "The conversion failed",
     "SubtitleOcrFinish": "Finish",
-    "SubtitleOcrIsName": "It's a name",
-    "SubtitleOcrItalic": "Italic",
+    "SubtitleOcrGeneratingCandidates": "Generating candidates",
     "SubtitleOcrLeaveConfirm": "Leaving this page cancels the conversion. Leave anyway?",
-    "SubtitleOcrNeverAsk": "Never ask about this word again",
+    "SubtitleOcrNamesLabel": "Names to remember",
+    "SubtitleOcrNamesPlaceholder": "Anakin, Padme",
     "SubtitleOcrNothingToConvert": "This item has no PGS or VobSub subtitle track without a text version.",
-    "SubtitleOcrNotName": "Not a name",
     "SubtitleOcrNotSupported": "This server does not support subtitle conversion.",
-    "SubtitleOcrOccurrences": "Used in {0} cues",
     "SubtitleOcrPickTrack": "Choose the subtitle track to convert",
     "SubtitleOcrRecognising": "Recognising text",
     "SubtitleOcrReconnecting": "Reconnecting",
-    "SubtitleOcrReject": "Reject",
-    "SubtitleOcrRemaining": "{0} remaining",
+    "SubtitleOcrResolvedCount": "{0} lines resolved automatically",
     "SubtitleOcrRetry": "Retry",
     "SubtitleOcrReviewTitle": "Please check these",
     "SubtitleOcrSaved": "Subtitles saved ({0} cues)",
     "SubtitleOcrSaving": "Saving",
-    "SubtitleOcrShapesNeedHelp": "{0} letter shapes need your help",
-    "SubtitleOcrSkip": "Skip",
+    "SubtitleOcrScoringCandidates": "Scoring candidates",
     "SubtitleOcrTitle": "Convert subtitles",
-    "SubtitleOcrTypeLetter": "Type the letter",
-    "SubtitleOcrUnknownLetter": "Which letter is this?",
+    "SubtitleOcrTypeCorrection": "Type a correction",
+    "SubtitleOcrUploading": "Uploading to the OCR service",
 ```
 
 Run: `node -e "JSON.parse(require('fs').readFileSync('src/strings/en-us.json','utf8')); console.log('valid')"`
@@ -1567,10 +1543,10 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 **Interfaces:**
 - Consumes: hooks from Task 4, `TrackPicker`, `PageMessage` (Task 5), `confirm` from `components/confirm/confirm`, `useBlocker` from `react-router-dom`.
 - Produces:
-  - `type Phase = 'loading' | 'pick' | 'nothing' | 'progress' | 'glyph' | 'review' | 'done' | 'failed'`
+  - `type Phase = 'loading' | 'pick' | 'nothing' | 'progress' | 'review' | 'done' | 'failed'`
   - `phaseFor(args: { hasJobId: boolean; job?: OcrJob; trackCount: number; itemLoaded: boolean }): Phase`
   - `isJobActive(state?: JobState): boolean` — true for every non-terminal state.
-  - `progressLabelKey(state: JobState): string` — the translation key for the phase label.
+  - `progressLabelKey(state: JobState, stage: JobStage): string` — the translation key for the phase label; `stage` only matters during `Recognising`.
   - `JobProgress({ job, isReconnecting, onCancel, isCancelling, labelKeyOverride? })`
   - `useLeaveGuard(active: boolean, onLeave: () => Promise<void>)` — blocks in-app navigation while `active`, confirms with the user, runs `onLeave` then proceeds.
 
@@ -1584,8 +1560,8 @@ import { describe, expect, it } from 'vitest';
 import type { OcrJob } from '../types';
 import { isJobActive, phaseFor, progressLabelKey } from './phase';
 
-const job = (State: OcrJob['State']): OcrJob => ({
-    Id: 'j', ItemId: 'i', MediaSourceId: 'm', StreamIndex: 2, State, CuesDone: 0, CuesTotal: 0, QuestionsRemaining: 0
+const job = (State: OcrJob['State'], Stage: OcrJob['Stage'] = ''): OcrJob => ({
+    Id: 'j', ItemId: 'i', MediaSourceId: 'm', StreamIndex: 2, State, Stage, Done: 0, Total: 0
 });
 
 describe('phaseFor', () => {
@@ -1613,9 +1589,8 @@ describe('phaseFor', () => {
         const at = (state: OcrJob['State']) => phaseFor({ hasJobId: true, job: job(state), trackCount: 1, itemLoaded: true });
 
         expect(at('Extracting')).toBe('progress');
+        expect(at('Uploading')).toBe('progress');
         expect(at('Recognising')).toBe('progress');
-        expect(at('Correcting')).toBe('progress');
-        expect(at('AwaitingGlyph')).toBe('glyph');
         expect(at('AwaitingReview')).toBe('review');
         expect(at('Done')).toBe('done');
         expect(at('Failed')).toBe('failed');
@@ -1626,7 +1601,7 @@ describe('phaseFor', () => {
 describe('isJobActive', () => {
     it('is true for non-terminal states only', () => {
         expect(isJobActive('Extracting')).toBe(true);
-        expect(isJobActive('AwaitingGlyph')).toBe(true);
+        expect(isJobActive('Uploading')).toBe(true);
         expect(isJobActive('AwaitingReview')).toBe(true);
         expect(isJobActive('Done')).toBe(false);
         expect(isJobActive('Failed')).toBe(false);
@@ -1637,10 +1612,17 @@ describe('isJobActive', () => {
 
 describe('progressLabelKey', () => {
     it('names each working phase', () => {
-        expect(progressLabelKey('Extracting')).toBe('SubtitleOcrExtracting');
-        expect(progressLabelKey('Recognising')).toBe('SubtitleOcrRecognising');
-        expect(progressLabelKey('Correcting')).toBe('SubtitleOcrChecking');
-        expect(progressLabelKey('AwaitingReview')).toBe('SubtitleOcrSaving');
+        expect(progressLabelKey('Extracting', '')).toBe('SubtitleOcrExtracting');
+        expect(progressLabelKey('Uploading', '')).toBe('SubtitleOcrUploading');
+        expect(progressLabelKey('AwaitingReview', '')).toBe('SubtitleOcrSaving');
+    });
+
+    it('names each Recognising sub-stage', () => {
+        expect(progressLabelKey('Recognising', 'ocr')).toBe('SubtitleOcrRecognising');
+        expect(progressLabelKey('Recognising', 'candidates')).toBe('SubtitleOcrGeneratingCandidates');
+        expect(progressLabelKey('Recognising', 'scoring')).toBe('SubtitleOcrScoringCandidates');
+        expect(progressLabelKey('Recognising', 'adjudicating')).toBe('SubtitleOcrCheckingUncertain');
+        expect(progressLabelKey('Recognising', '')).toBe('SubtitleOcrRecognising');
     });
 });
 ```
@@ -1655,9 +1637,9 @@ Expected: FAIL with "Failed to resolve import './phase'".
 `src/apps/legacy/features/subtitleOcr/utils/phase.ts`:
 
 ```ts
-import type { JobState, OcrJob } from '../types';
+import type { JobStage, JobState, OcrJob } from '../types';
 
-export type Phase = 'loading' | 'pick' | 'nothing' | 'progress' | 'glyph' | 'review' | 'done' | 'failed';
+export type Phase = 'loading' | 'pick' | 'nothing' | 'progress' | 'review' | 'done' | 'failed';
 
 interface PhaseArgs {
     hasJobId: boolean;
@@ -1681,8 +1663,6 @@ export const phaseFor = ({ hasJobId, job, trackCount, itemLoaded }: PhaseArgs): 
     if (!job) return 'loading';
 
     switch (job.State) {
-        case 'AwaitingGlyph':
-            return 'glyph';
         case 'AwaitingReview':
             return 'review';
         case 'Done':
@@ -1695,14 +1675,23 @@ export const phaseFor = ({ hasJobId, job, trackCount, itemLoaded }: PhaseArgs): 
     }
 };
 
-export const progressLabelKey = (state: JobState): string => {
+export const progressLabelKey = (state: JobState, stage: JobStage): string => {
     switch (state) {
         case 'Extracting':
             return 'SubtitleOcrExtracting';
+        case 'Uploading':
+            return 'SubtitleOcrUploading';
         case 'Recognising':
-            return 'SubtitleOcrRecognising';
-        case 'Correcting':
-            return 'SubtitleOcrChecking';
+            switch (stage) {
+                case 'candidates':
+                    return 'SubtitleOcrGeneratingCandidates';
+                case 'scoring':
+                    return 'SubtitleOcrScoringCandidates';
+                case 'adjudicating':
+                    return 'SubtitleOcrCheckingUncertain';
+                default:
+                    return 'SubtitleOcrRecognising';
+            }
         default:
             return 'SubtitleOcrSaving';
     }
@@ -1744,9 +1733,9 @@ interface JobProgressProps {
 }
 
 const JobProgress: FC<JobProgressProps> = ({ job, isReconnecting, labelKeyOverride, onCancel, isCancelling }) => {
-    const labelKey = labelKeyOverride || (job ? progressLabelKey(job.State) : 'SubtitleOcrExtracting');
-    const showBar = job?.State === 'Recognising' && job.CuesTotal > 0;
-    const percent = showBar ? Math.round((job.CuesDone / job.CuesTotal) * 100) : 0;
+    const labelKey = labelKeyOverride || (job ? progressLabelKey(job.State, job.Stage) : 'SubtitleOcrExtracting');
+    const showBar = !!job && job.Total > 0;
+    const percent = showBar ? Math.round((job.Done / job.Total) * 100) : 0;
 
     return (
         <PageMessage title={globalize.translate('SubtitleOcrTitle')}>
@@ -1761,12 +1750,7 @@ const JobProgress: FC<JobProgressProps> = ({ job, isReconnecting, labelKeyOverri
                     <LinearProgress variant='indeterminate' />
                 )}
                 {showBar && (
-                    <Typography variant='body2'>{job.CuesDone} / {job.CuesTotal}</Typography>
-                )}
-                {!!job?.QuestionsRemaining && (
-                    <Typography variant='body2'>
-                        {globalize.translate('SubtitleOcrShapesNeedHelp', job.QuestionsRemaining)}
-                    </Typography>
+                    <Typography variant='body2'>{job.Done} / {job.Total}</Typography>
                 )}
                 {job?.Warning && <Alert severity='warning'>{job.Warning}</Alert>}
                 <Stack direction='row' justifyContent='flex-end'>
@@ -1948,7 +1932,7 @@ const SubtitleOcr: FC = () => {
             );
             break;
         default:
-            // glyph, review, done and failed are added in the following tasks.
+            // review, done and failed are added in the following tasks.
             content = <Spinner />;
     }
 
@@ -1986,412 +1970,32 @@ Expected: with one PGS track, the progress card appears immediately with "Extrac
 git add src/apps/legacy/routes/subtitleOcr.tsx src/apps/legacy/features/subtitleOcr
 git commit -m "Start, poll and cancel subtitle OCR jobs from the page
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
 ```
 
 ---
 
-### Task 8: Glyph prompt with keyboard entry and answer re-anchoring
+### Task 8: Review table components — crop images, scored candidates, resolved-lines audit
 
 **Files:**
-- Create: `src/apps/legacy/features/subtitleOcr/components/GlyphPrompt.tsx`
-- Create: `src/apps/legacy/features/subtitleOcr/components/GlyphImage.tsx`
-- Create: `src/apps/legacy/features/subtitleOcr/utils/glyphAnswer.ts`
-- Test: `src/apps/legacy/features/subtitleOcr/utils/glyphAnswer.test.ts`
-- Modify: `src/apps/legacy/routes/subtitleOcr.tsx`
-
-**Interfaces:**
-- Consumes: `useGlyph`, `useAnswerGlyph`, `statusOf` (Task 4), `GlyphQuestion`, `GlyphAnswer` (Task 1), `layoutManager` from `components/layoutManager`.
-- Produces:
-  - `type AnswerOutcome = 'applied' | 'resend' | 'give-up'`
-  - `resolveAnswerOutcome(args: { answeredShapeId: string; currentShapeId: string | null | undefined; attempts: number; status?: number }): AnswerOutcome`
-  - `GlyphImage({ question })` — cue image with the letter bounds drawn.
-  - `GlyphPrompt({ question, onAnswer: (answer: GlyphAnswer) => void, isSubmitting: boolean, pendingRetry?: GlyphAnswer, onRetry: () => void })`
-
-- [ ] **Step 1: Write the failing re-anchoring tests**
-
-`src/apps/legacy/features/subtitleOcr/utils/glyphAnswer.test.ts`:
-
-```ts
-import { describe, expect, it } from 'vitest';
-
-import { resolveAnswerOutcome } from './glyphAnswer';
-
-describe('resolveAnswerOutcome', () => {
-    it('treats a different current shape as applied', () => {
-        expect(resolveAnswerOutcome({ answeredShapeId: 'a', currentShapeId: 'b', attempts: 1 })).toBe('applied');
-    });
-
-    it('treats no current glyph (204) as applied', () => {
-        expect(resolveAnswerOutcome({ answeredShapeId: 'a', currentShapeId: null, attempts: 1 })).toBe('applied');
-    });
-
-    it('treats a 409 as applied because the queue moved on', () => {
-        expect(resolveAnswerOutcome({ answeredShapeId: 'a', currentShapeId: 'a', attempts: 1, status: 409 })).toBe('applied');
-    });
-
-    it('resends once when the same shape is still current after a network failure', () => {
-        expect(resolveAnswerOutcome({ answeredShapeId: 'a', currentShapeId: 'a', attempts: 1 })).toBe('resend');
-    });
-
-    it('gives up after the automatic resend also failed', () => {
-        expect(resolveAnswerOutcome({ answeredShapeId: 'a', currentShapeId: 'a', attempts: 2 })).toBe('give-up');
-    });
-
-    it('waits for the refetch when the current shape is unknown', () => {
-        expect(resolveAnswerOutcome({ answeredShapeId: 'a', currentShapeId: undefined, attempts: 1 })).toBe('give-up');
-    });
-});
-```
-
-- [ ] **Step 2: Run the tests to verify they fail**
-
-Run: `npx vitest run src/apps/legacy/features/subtitleOcr/utils/glyphAnswer.test.ts`
-Expected: FAIL with "Failed to resolve import './glyphAnswer'".
-
-- [ ] **Step 3: Implement the decision helper**
-
-`src/apps/legacy/features/subtitleOcr/utils/glyphAnswer.ts`:
-
-```ts
-export type AnswerOutcome = 'applied' | 'resend' | 'give-up';
-
-interface ResolveArgs {
-    /** Shape id the user answered. */
-    answeredShapeId: string;
-    /** Shape id the server serves now: a string, null for "no question" (204), undefined when unknown. */
-    currentShapeId: string | null | undefined;
-    /** How many times the answer has been sent so far, including the failed one. */
-    attempts: number;
-    /** HTTP status of the failure, when there was a response. */
-    status?: number;
-}
-
-/**
- * After a failed answer request, decides what to do from the glyph the server serves now.
- * The server always serves the head of its queue, so a different or absent shape means the
- * answer was applied. The same shape means it was not; resend once, then hand control back
- * to the user with a Retry button.
- */
-export const resolveAnswerOutcome = ({ answeredShapeId, currentShapeId, attempts, status }: ResolveArgs): AnswerOutcome => {
-    if (status === 409) return 'applied';
-    if (currentShapeId === null) return 'applied';
-    if (currentShapeId === undefined) return 'give-up';
-    if (currentShapeId !== answeredShapeId) return 'applied';
-    return attempts < 2 ? 'resend' : 'give-up';
-};
-```
-
-- [ ] **Step 4: Run the tests to verify they pass**
-
-Run: `npx vitest run src/apps/legacy/features/subtitleOcr/utils/glyphAnswer.test.ts`
-Expected: PASS, 6 tests.
-
-- [ ] **Step 5: Write the image and prompt components**
-
-`src/apps/legacy/features/subtitleOcr/components/GlyphImage.tsx`:
-
-```tsx
-import Box from '@mui/material/Box';
-import React, { type FC, useEffect, useRef } from 'react';
-
-import type { GlyphQuestion } from '../types';
-
-interface GlyphImageProps {
-    question: GlyphQuestion;
-}
-
-/** The cue bitmap with a rectangle around the unknown letter, scaled to the container width. */
-const GlyphImage: FC<GlyphImageProps> = ({ question }) => {
-    const canvasRef = useRef<HTMLCanvasElement>(null);
-
-    useEffect(() => {
-        const canvas = canvasRef.current;
-        if (!canvas) return;
-
-        const image = new Image();
-        image.onload = () => {
-            canvas.width = image.width;
-            canvas.height = image.height;
-            const context = canvas.getContext('2d');
-            if (!context) return;
-            context.drawImage(image, 0, 0);
-            context.lineWidth = Math.max(2, Math.round(image.width / 300));
-            context.strokeStyle = '#ff5252';
-            context.strokeRect(question.Left - 2, question.Top - 2, question.Width + 4, question.Height + 4);
-        };
-        image.src = `data:image/png;base64,${question.CuePngBase64}`;
-    }, [ question ]);
-
-    return (
-        <Box sx={{ bgcolor: '#000', borderRadius: 1, p: 1 }}>
-            <canvas ref={canvasRef} style={{ width: '100%', height: 'auto', display: 'block' }} />
-        </Box>
-    );
-};
-
-export default GlyphImage;
-```
-
-`src/apps/legacy/features/subtitleOcr/components/GlyphPrompt.tsx`:
-
-```tsx
-import Alert from '@mui/material/Alert';
-import Box from '@mui/material/Box';
-import Button from '@mui/material/Button';
-import Checkbox from '@mui/material/Checkbox';
-import FormControlLabel from '@mui/material/FormControlLabel';
-import Stack from '@mui/material/Stack';
-import TextField from '@mui/material/TextField';
-import Typography from '@mui/material/Typography';
-import React, { type FC, type FormEvent, useCallback, useEffect, useRef, useState } from 'react';
-
-import layoutManager from 'components/layoutManager';
-import globalize from 'lib/globalize';
-
-import type { GlyphAnswer, GlyphQuestion } from '../types';
-import GlyphImage from './GlyphImage';
-
-interface GlyphPromptProps {
-    question: GlyphQuestion;
-    onAnswer: (answer: GlyphAnswer) => void;
-    isSubmitting: boolean;
-    /** Set when an answer failed twice; shows a Retry button that resends it. */
-    pendingRetry?: GlyphAnswer;
-    onRetry: () => void;
-}
-
-const GlyphPrompt: FC<GlyphPromptProps> = ({ question, onAnswer, isSubmitting, pendingRetry, onRetry }) => {
-    const [ text, setText ] = useState('');
-    const [ italic, setItalic ] = useState(false);
-    const inputRef = useRef<HTMLInputElement>(null);
-    const useHardwareKeyboardFocus = !layoutManager.mobile;
-
-    // New question: clear the field and, off touch layouts, focus it.
-    useEffect(() => {
-        setText('');
-        if (useHardwareKeyboardFocus) {
-            inputRef.current?.focus();
-        }
-    }, [ question.ShapeId, useHardwareKeyboardFocus ]);
-
-    // On touch layouts a hardware keyboard should still work without tapping the field first.
-    useEffect(() => {
-        if (useHardwareKeyboardFocus) return;
-
-        const onKeyDown = (event: KeyboardEvent) => {
-            if (document.activeElement === inputRef.current) return;
-            if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {
-                inputRef.current?.focus();
-            }
-        };
-
-        document.addEventListener('keydown', onKeyDown);
-        return () => document.removeEventListener('keydown', onKeyDown);
-    }, [ useHardwareKeyboardFocus ]);
-
-    const submit = useCallback((value: string) => {
-        if (!value || isSubmitting) return;
-        onAnswer({ ShapeId: question.ShapeId, Text: value, Italic: italic, Skip: false });
-    }, [ isSubmitting, italic, onAnswer, question.ShapeId ]);
-
-    const onSubmit = useCallback((event: FormEvent) => {
-        event.preventDefault();
-        submit(text);
-    }, [ submit, text ]);
-
-    const skip = useCallback(() => {
-        if (isSubmitting) return;
-        onAnswer({ ShapeId: question.ShapeId, Text: null, Italic: false, Skip: true });
-    }, [ isSubmitting, onAnswer, question.ShapeId ]);
-
-    return (
-        <Stack spacing={2}>
-            <Stack direction='row' justifyContent='space-between' alignItems='baseline'>
-                <Typography variant='h2' component='h2'>{globalize.translate('SubtitleOcrUnknownLetter')}</Typography>
-                <Typography variant='body2'>{globalize.translate('SubtitleOcrRemaining', question.Remaining)}</Typography>
-            </Stack>
-
-            <GlyphImage question={question} />
-
-            <Stack direction='row' spacing={2} alignItems='center'>
-                <Box sx={{ bgcolor: '#000', borderRadius: 1, p: 1, lineHeight: 0 }}>
-                    <img
-                        alt=''
-                        src={`data:image/png;base64,${question.LetterPngBase64}`}
-                        style={{ height: 96, imageRendering: 'pixelated' }}
-                    />
-                </Box>
-                <Typography variant='body2'>{globalize.translate('SubtitleOcrOccurrences', question.Occurrences)}</Typography>
-            </Stack>
-
-            {question.Candidates.length > 0 && (
-                <Stack direction='row' spacing={1} flexWrap='wrap' useFlexGap>
-                    {question.Candidates.map(candidate => (
-                        <Button
-                            key={candidate}
-                            variant='outlined'
-                            size='large'
-                            disabled={isSubmitting}
-                            onClick={() => submit(candidate)}
-                            sx={{ minWidth: 56, fontSize: '1.25rem', fontStyle: italic ? 'italic' : 'normal' }}
-                        >
-                            {candidate}
-                        </Button>
-                    ))}
-                </Stack>
-            )}
-
-            <form onSubmit={onSubmit}>
-                <Stack direction='row' spacing={1} alignItems='center'>
-                    <TextField
-                        inputRef={inputRef}
-                        label={globalize.translate('SubtitleOcrTypeLetter')}
-                        value={text}
-                        onChange={e => setText(e.target.value)}
-                        size='small'
-                        autoComplete='off'
-                        slotProps={{ htmlInput: { autoCapitalize: 'none', spellCheck: false } }}
-                        sx={{ flexGrow: 1 }}
-                    />
-                    <FormControlLabel
-                        control={<Checkbox checked={italic} onChange={e => setItalic(e.target.checked)} />}
-                        label={globalize.translate('SubtitleOcrItalic')}
-                    />
-                    <Button type='submit' variant='contained' disabled={!text || isSubmitting}>
-                        {globalize.translate('ButtonOk')}
-                    </Button>
-                    <Button onClick={skip} disabled={isSubmitting}>{globalize.translate('SubtitleOcrSkip')}</Button>
-                </Stack>
-            </form>
-
-            {pendingRetry && (
-                <Alert
-                    severity='error'
-                    action={<Button color='inherit' size='small' onClick={onRetry}>{globalize.translate('SubtitleOcrRetry')}</Button>}
-                >
-                    {globalize.translate('MessageUnableToConnectToServer')}
-                </Alert>
-            )}
-        </Stack>
-    );
-};
-
-export default GlyphPrompt;
-```
-
-- [ ] **Step 6: Wire the glyph phase into the page**
-
-In `src/apps/legacy/routes/subtitleOcr.tsx`:
-
-Add imports:
-
-```tsx
-import { useAnswerGlyph } from 'apps/legacy/features/subtitleOcr/api/useAnswerGlyph';
-import { useGlyph } from 'apps/legacy/features/subtitleOcr/api/useGlyph';
-import { statusOf } from 'apps/legacy/features/subtitleOcr/api/request';
-import GlyphPrompt from 'apps/legacy/features/subtitleOcr/components/GlyphPrompt';
-import type { EligibleTrack, GlyphAnswer } from 'apps/legacy/features/subtitleOcr/types';
-import { resolveAnswerOutcome } from 'apps/legacy/features/subtitleOcr/utils/glyphAnswer';
-```
-
-After the `useJob` line add:
-
-```tsx
-    const isGlyphPhase = job?.State === 'AwaitingGlyph';
-    const glyph = useGlyph(jobId, isGlyphPhase);
-    const answerGlyph = useAnswerGlyph(jobId);
-    const [ pendingRetry, setPendingRetry ] = useState<GlyphAnswer>();
-
-    const sendAnswer = useCallback((answer: GlyphAnswer, attempts: number) => {
-        answerGlyph.mutate(answer, {
-            onSuccess: () => setPendingRetry(undefined),
-            onError: async error => {
-                const status = statusOf(error);
-                const refreshed = await glyph.refetch();
-                const outcome = resolveAnswerOutcome({
-                    answeredShapeId: answer.ShapeId,
-                    currentShapeId: refreshed.data === undefined ? undefined : refreshed.data?.ShapeId ?? null,
-                    attempts,
-                    status
-                });
-
-                if (outcome === 'resend') {
-                    sendAnswer(answer, attempts + 1);
-                } else if (outcome === 'give-up') {
-                    setPendingRetry(answer);
-                } else {
-                    setPendingRetry(undefined);
-                }
-            }
-        });
-    }, [ answerGlyph, glyph ]);
-
-    const onAnswer = useCallback((answer: GlyphAnswer) => sendAnswer(answer, 1), [ sendAnswer ]);
-    const onRetry = useCallback(() => {
-        if (pendingRetry) sendAnswer(pendingRetry, 1);
-    }, [ pendingRetry, sendAnswer ]);
-```
-
-Add a `case 'glyph':` to the `switch (phase)`:
-
-```tsx
-        case 'glyph':
-            content = glyph.data ? (
-                <GlyphPrompt
-                    question={glyph.data}
-                    onAnswer={onAnswer}
-                    isSubmitting={answerGlyph.isPending}
-                    pendingRetry={pendingRetry}
-                    onRetry={onRetry}
-                />
-            ) : (
-                <Spinner />
-            );
-            break;
-```
-
-The `useAnswerGlyph` hook invalidates the glyph and job queries on settle, so after a successful answer the next question appears without an extra poll.
-
-- [ ] **Step 7: Lint and type check**
-
-Run: `npx eslint src/apps/legacy/routes/subtitleOcr.tsx src/apps/legacy/features/subtitleOcr && npm run build:check`
-Expected: clean. If `useCallback` complains about the recursive `sendAnswer`, declare it with `useRef` holding the latest function: `const sendAnswerRef = useRef<(a: GlyphAnswer, n: number) => void>(); sendAnswerRef.current = sendAnswer;` and call `sendAnswerRef.current?.(answer, attempts + 1)` inside.
-
-- [ ] **Step 8: Verify in the browser**
-
-Run a conversion on the Bitmap movie whose PGS track uses a font outside the seeded set (the rig's `make_media.py` produces one; see the server plan Task 12).
-Expected: after recognition, the glyph prompt shows the cue image with a red box around one letter, the enlarged letter, candidate buttons and a text field. On desktop the field has focus and typing a letter plus Enter moves to the next shape; tapping a candidate does the same; Skip advances without learning. The remaining counter decreases. In the browser's device emulation (touch), the field is not focused on load but pressing a key on the keyboard focuses it and types. When the queue empties the page returns to the progress card ("Checking spelling").
-
-- [ ] **Step 9: Commit**
-
-```bash
-git add src/apps/legacy/routes/subtitleOcr.tsx src/apps/legacy/features/subtitleOcr
-git commit -m "Add glyph prompt with keyboard entry and answer re-anchoring
-
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
-```
-
----
-
-### Task 9: Uncertainty prompt, auto-accept and completion
-
-**Files:**
-- Create: `src/apps/legacy/features/subtitleOcr/components/UncertaintyPrompt.tsx`
-- Create: `src/apps/legacy/features/subtitleOcr/components/EditCard.tsx`
-- Create: `src/apps/legacy/features/subtitleOcr/components/NameCard.tsx`
 - Create: `src/apps/legacy/features/subtitleOcr/components/DiffText.tsx`
-- Modify: `src/apps/legacy/routes/subtitleOcr.tsx`
+- Create: `src/apps/legacy/features/subtitleOcr/components/LineCropImage.tsx`
+- Create: `src/apps/legacy/features/subtitleOcr/components/UncertainLineCard.tsx`
+- Create: `src/apps/legacy/features/subtitleOcr/components/ResolvedLinesList.tsx`
+- Create: `src/apps/legacy/features/subtitleOcr/components/ReviewTable.tsx`
 
 **Interfaces:**
-- Consumes: `useReview`, `useAccept` (Task 4), `splitReview`, `emptyAnswers`, `isReviewComplete`, `buildAcceptRequest`, `ReviewAnswers`, `EditDecision` (Task 3), `wordDiff`, `changedWords` (Task 2), `getItemQuery` from `hooks/useItem`, `queryClient`.
+- Consumes: `useCropImage` (Task 4), `Review`, `ReviewLine` (Task 1), `isReviewComplete`, `splitReview` (Task 3), `wordDiff` (Task 2), `layoutManager` from `components/layoutManager`.
 - Produces:
-  - `DiffText({ original, corrected })` — renders `wordDiff` segments: removed as struck-through, added as highlighted.
-  - `EditCard({ edit, cueText, decision, neverAsk, onDecide: (d: EditDecision) => void, onNeverAskChange: (v: boolean) => void })`
-  - `NameCard({ name, cueText, decision?: boolean, onDecide: (isName: boolean) => void })`
-  - `UncertaintyPrompt({ review, answers, onAnswersChange, onFinish, isFinishing, error?: string | null })`
+  - `DiffText({ original, corrected })` — renders `wordDiff` segments: removed struck through, added highlighted.
+  - `LineCropImage({ jobId, index })` — the line's crop image, fetched on demand as an authenticated binary request and shown through an object URL.
+  - `UncertainLineCard({ jobId, line, decision?: string, onDecide: (text: string) => void })` — crop image, scored candidate buttons and a free-text override for one uncertain line.
+  - `ResolvedLinesList({ lines })` — collapsed audit list of certain/adjudicated lines, no crop images fetched.
+  - `ReviewTable({ jobId, review, decisions, onDecide, namesText, onNamesTextChange, onFinish, isFinishing, error? })` — composes the above into the whole review screen.
 
-- [ ] **Step 1: Write the presentational components**
+This task builds presentational components only; Task 9 wires `ReviewTable` and its state into the page. There is no new pure logic here beyond what Tasks 2 and 3 already test, so no new unit tests; the components are checked by the manual pass in Task 9.
+
+- [ ] **Step 1: Write `DiffText`**
 
 `src/apps/legacy/features/subtitleOcr/components/DiffText.tsx`:
 
@@ -2436,211 +2040,323 @@ const DiffText: FC<DiffTextProps> = ({ original, corrected }) => {
 export default DiffText;
 ```
 
-`src/apps/legacy/features/subtitleOcr/components/EditCard.tsx`:
+- [ ] **Step 2: Write `LineCropImage`**
+
+`src/apps/legacy/features/subtitleOcr/components/LineCropImage.tsx`:
+
+```tsx
+import Box from '@mui/material/Box';
+import Skeleton from '@mui/material/Skeleton';
+import React, { type FC, useEffect, useState } from 'react';
+
+import globalize from 'lib/globalize';
+
+import { useCropImage } from '../api/useCropImage';
+
+interface LineCropImageProps {
+    jobId: string;
+    index: number;
+}
+
+/**
+ * Shows one line's crop image. `GET /Jobs/{id}/Crops/{index}` is admin-gated and returns raw PNG, so
+ * it is fetched as an authenticated binary request (`useCropImage`) and shown through an object URL,
+ * not a bare `<img src>`, which would carry no `Authorization` header and 401. The object URL is
+ * revoked whenever the underlying blob changes or the component unmounts.
+ */
+const LineCropImage: FC<LineCropImageProps> = ({ jobId, index }) => {
+    const { data: blob, isError, isPending } = useCropImage(jobId, index);
+    const [ url, setUrl ] = useState<string>();
+
+    useEffect(() => {
+        if (!blob) {
+            setUrl(undefined);
+            return;
+        }
+
+        const objectUrl = URL.createObjectURL(blob);
+        setUrl(objectUrl);
+        return () => URL.revokeObjectURL(objectUrl);
+    }, [ blob ]);
+
+    if (isPending) {
+        return <Skeleton variant='rounded' height={64} />;
+    }
+
+    if (isError || !url) {
+        return (
+            <Box sx={{ bgcolor: 'action.disabledBackground', borderRadius: 1, p: 1 }}>
+                {globalize.translate('SubtitleOcrCropLoadFailed')}
+            </Box>
+        );
+    }
+
+    return (
+        <Box sx={{ bgcolor: '#000', borderRadius: 1, p: 1 }}>
+            <img alt='' src={url} style={{ maxWidth: '100%', height: 'auto', display: 'block' }} />
+        </Box>
+    );
+};
+
+export default LineCropImage;
+```
+
+- [ ] **Step 3: Write `UncertainLineCard`**
+
+`src/apps/legacy/features/subtitleOcr/components/UncertainLineCard.tsx`:
 
 ```tsx
 import Button from '@mui/material/Button';
 import Card from '@mui/material/Card';
 import CardContent from '@mui/material/CardContent';
-import Checkbox from '@mui/material/Checkbox';
-import FormControlLabel from '@mui/material/FormControlLabel';
 import Stack from '@mui/material/Stack';
+import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
-import React, { type FC } from 'react';
+import React, { type FC, type FormEvent, useCallback, useEffect, useRef, useState } from 'react';
+
+import layoutManager from 'components/layoutManager';
+import globalize from 'lib/globalize';
+
+import type { ReviewLine } from '../types';
+import LineCropImage from './LineCropImage';
+
+interface UncertainLineCardProps {
+    jobId: string;
+    line: ReviewLine;
+    /** The text the user has picked or typed for this line so far, if any. */
+    decision?: string;
+    onDecide: (text: string) => void;
+}
+
+/**
+ * One uncertain line: crop image, scored candidate buttons and a free-text override. Structurally
+ * the direct successor of the old per-glyph picker, operating on a whole line's text instead of one
+ * letter shape.
+ */
+const UncertainLineCard: FC<UncertainLineCardProps> = ({ jobId, line, decision, onDecide }) => {
+    const [ text, setText ] = useState(decision ?? '');
+    const inputRef = useRef<HTMLInputElement>(null);
+    const useHardwareKeyboardFocus = !layoutManager.mobile;
+
+    useEffect(() => {
+        if (useHardwareKeyboardFocus) {
+            inputRef.current?.focus();
+        }
+    }, [ useHardwareKeyboardFocus ]);
+
+    // On touch layouts a hardware keyboard should still work without tapping the field first.
+    useEffect(() => {
+        if (useHardwareKeyboardFocus) return;
+
+        const onKeyDown = (event: KeyboardEvent) => {
+            if (document.activeElement === inputRef.current) return;
+            if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {
+                inputRef.current?.focus();
+            }
+        };
+
+        document.addEventListener('keydown', onKeyDown);
+        return () => document.removeEventListener('keydown', onKeyDown);
+    }, [ useHardwareKeyboardFocus ]);
+
+    const submit = useCallback((value: string) => {
+        if (!value) return;
+        onDecide(value);
+    }, [ onDecide ]);
+
+    const onSubmit = useCallback((event: FormEvent) => {
+        event.preventDefault();
+        submit(text);
+    }, [ submit, text ]);
+
+    return (
+        <Card variant='outlined'>
+            <CardContent>
+                <Stack spacing={1.5}>
+                    <LineCropImage jobId={jobId} index={line.Index} />
+
+                    {line.Candidates.length > 0 && (
+                        <Stack direction='row' spacing={1} flexWrap='wrap' useFlexGap>
+                            {line.Candidates.map(candidate => (
+                                <Button
+                                    key={candidate.Text}
+                                    variant={decision === candidate.Text ? 'contained' : 'outlined'}
+                                    onClick={() => { setText(candidate.Text); submit(candidate.Text); }}
+                                >
+                                    {candidate.Text}
+                                    {candidate.Score !== null && (
+                                        <Typography component='span' variant='caption' sx={{ ml: 0.75, opacity: 0.7 }}>
+                                            {candidate.Score.toFixed(2)}
+                                        </Typography>
+                                    )}
+                                </Button>
+                            ))}
+                        </Stack>
+                    )}
+
+                    <form onSubmit={onSubmit}>
+                        <Stack direction='row' spacing={1}>
+                            <TextField
+                                inputRef={inputRef}
+                                label={globalize.translate('SubtitleOcrTypeCorrection')}
+                                value={text}
+                                onChange={e => setText(e.target.value)}
+                                size='small'
+                                autoComplete='off'
+                                slotProps={{ htmlInput: { autoCapitalize: 'none', spellCheck: false } }}
+                                sx={{ flexGrow: 1 }}
+                            />
+                            <Button type='submit' variant='contained' disabled={!text}>
+                                {globalize.translate('ButtonOk')}
+                            </Button>
+                        </Stack>
+                    </form>
+
+                    {decision !== undefined && (
+                        <Typography variant='body2' color='text.secondary'>{decision}</Typography>
+                    )}
+                </Stack>
+            </CardContent>
+        </Card>
+    );
+};
+
+export default UncertainLineCard;
+```
+
+- [ ] **Step 4: Write `ResolvedLinesList`**
+
+`src/apps/legacy/features/subtitleOcr/components/ResolvedLinesList.tsx`:
+
+```tsx
+import Collapse from '@mui/material/Collapse';
+import List from '@mui/material/List';
+import ListItem from '@mui/material/ListItem';
+import ListItemText from '@mui/material/ListItemText';
+import Tooltip from '@mui/material/Tooltip';
+import Typography from '@mui/material/Typography';
+import React, { type FC, useState } from 'react';
 
 import globalize from 'lib/globalize';
 
-import type { ReviewEdit } from '../types';
-import type { EditDecision } from '../utils/review';
+import type { ReviewLine } from '../types';
 import DiffText from './DiffText';
 
-interface EditCardProps {
-    edit: ReviewEdit;
-    decision?: EditDecision;
-    neverAsk: boolean;
-    onDecide: (decision: EditDecision) => void;
-    onNeverAskChange: (value: boolean) => void;
+interface ResolvedLinesListProps {
+    lines: ReviewLine[];
 }
 
-const EditCard: FC<EditCardProps> = ({ edit, decision, neverAsk, onDecide, onNeverAskChange }) => (
-    <Card variant='outlined'>
-        <CardContent>
-            <Stack spacing={1}>
-                <Typography variant='body1'><DiffText original={edit.Original} corrected={edit.Corrected} /></Typography>
-                {edit.Reason && <Typography variant='body2' color='text.secondary'>{edit.Reason}</Typography>}
-                <Stack direction='row' spacing={1}>
-                    <Button
-                        variant={decision === 'accept' ? 'contained' : 'outlined'}
-                        color='success'
-                        onClick={() => onDecide('accept')}
-                    >
-                        {globalize.translate('SubtitleOcrAccept')}
-                    </Button>
-                    <Button
-                        variant={decision === 'reject' ? 'contained' : 'outlined'}
-                        color='error'
-                        onClick={() => onDecide('reject')}
-                    >
-                        {globalize.translate('SubtitleOcrReject')}
-                    </Button>
-                </Stack>
-                {decision === 'reject' && (
-                    <FormControlLabel
-                        control={<Checkbox checked={neverAsk} onChange={e => onNeverAskChange(e.target.checked)} />}
-                        label={globalize.translate('SubtitleOcrNeverAsk')}
-                    />
-                )}
-            </Stack>
-        </CardContent>
-    </Card>
-);
+/**
+ * Certain and adjudicated lines need no decision; they are listed collapsed for audit, with no crop
+ * images fetched (a full movie can have well over a thousand of these, so eagerly loading a crop per
+ * row would be prohibitively expensive; the diff text alone is enough to audit a run).
+ */
+const ResolvedLinesList: FC<ResolvedLinesListProps> = ({ lines }) => {
+    const [ open, setOpen ] = useState(false);
 
-export default EditCard;
+    if (lines.length === 0) return null;
+
+    return (
+        <>
+            <Typography
+                variant='body2'
+                sx={{ cursor: 'pointer', textDecoration: 'underline' }}
+                onClick={() => setOpen(o => !o)}
+            >
+                {globalize.translate('SubtitleOcrResolvedCount', lines.length)}
+            </Typography>
+            <Collapse in={open}>
+                <List dense>
+                    {lines.map(line => (
+                        <ListItem key={line.Index} divider>
+                            <ListItemText
+                                primary={<DiffText original={line.OcrText} corrected={line.ChosenText} />}
+                                secondary={line.Certainty === 'adjudicated' ? (
+                                    <Tooltip title={line.Adjudication?.ModelId || ''}>
+                                        <span>{globalize.translate('SubtitleOcrAdjudicatedBy')}</span>
+                                    </Tooltip>
+                                ) : undefined}
+                            />
+                        </ListItem>
+                    ))}
+                </List>
+            </Collapse>
+        </>
+    );
+};
+
+export default ResolvedLinesList;
 ```
 
-`src/apps/legacy/features/subtitleOcr/components/NameCard.tsx`:
+- [ ] **Step 5: Write `ReviewTable`**
 
-```tsx
-import Button from '@mui/material/Button';
-import Card from '@mui/material/Card';
-import CardContent from '@mui/material/CardContent';
-import Stack from '@mui/material/Stack';
-import Typography from '@mui/material/Typography';
-import React, { type FC } from 'react';
-
-import globalize from 'lib/globalize';
-
-import type { DetectedName } from '../types';
-
-interface NameCardProps {
-    name: DetectedName;
-    cueText?: string;
-    decision?: boolean;
-    onDecide: (isName: boolean) => void;
-}
-
-const NameCard: FC<NameCardProps> = ({ name, cueText, decision, onDecide }) => (
-    <Card variant='outlined'>
-        <CardContent>
-            <Stack spacing={1}>
-                <Typography variant='h3' component='p'>{name.Name}</Typography>
-                {cueText && <Typography variant='body2' color='text.secondary' sx={{ whiteSpace: 'pre-wrap' }}>{cueText}</Typography>}
-                <Stack direction='row' spacing={1}>
-                    <Button
-                        variant={decision === true ? 'contained' : 'outlined'}
-                        color='success'
-                        onClick={() => onDecide(true)}
-                    >
-                        {globalize.translate('SubtitleOcrIsName')}
-                    </Button>
-                    <Button
-                        variant={decision === false ? 'contained' : 'outlined'}
-                        color='error'
-                        onClick={() => onDecide(false)}
-                    >
-                        {globalize.translate('SubtitleOcrNotName')}
-                    </Button>
-                </Stack>
-            </Stack>
-        </CardContent>
-    </Card>
-);
-
-export default NameCard;
-```
-
-`src/apps/legacy/features/subtitleOcr/components/UncertaintyPrompt.tsx`:
+`src/apps/legacy/features/subtitleOcr/components/ReviewTable.tsx`:
 
 ```tsx
 import Alert from '@mui/material/Alert';
 import Button from '@mui/material/Button';
 import Stack from '@mui/material/Stack';
+import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
-import React, { type FC, useCallback, useMemo } from 'react';
+import React, { type FC } from 'react';
 
 import globalize from 'lib/globalize';
 
 import type { Review } from '../types';
-import { type EditDecision, type ReviewAnswers, isReviewComplete, splitReview } from '../utils/review';
-import { changedWords } from '../utils/wordDiff';
-import EditCard from './EditCard';
-import NameCard from './NameCard';
+import { isReviewComplete, splitReview } from '../utils/review';
+import ResolvedLinesList from './ResolvedLinesList';
+import UncertainLineCard from './UncertainLineCard';
 
-interface UncertaintyPromptProps {
+interface ReviewTableProps {
+    jobId: string;
     review: Review;
-    answers: ReviewAnswers;
-    onAnswersChange: (answers: ReviewAnswers) => void;
+    /** Keyed by `ReviewLine.Index`: the text the user has picked or typed for that uncertain line. */
+    decisions: Record<number, string>;
+    onDecide: (index: number, text: string) => void;
+    namesText: string;
+    onNamesTextChange: (value: string) => void;
     onFinish: () => void;
     isFinishing: boolean;
-    /** Error from a failed Accept; answers are kept so the user can retry. */
+    /** Error from a failed Accept; decisions and names stay so the user can retry. */
     error?: string | null;
 }
 
-type PromptCard =
-    | { kind: 'edit'; cueIndex: number; id: number }
-    | { kind: 'name'; cueIndex: number; name: string };
-
-const UncertaintyPrompt: FC<UncertaintyPromptProps> = ({ review, answers, onAnswersChange, onFinish, isFinishing, error }) => {
-    const split = useMemo(() => splitReview(review), [ review ]);
-    const cueText = useMemo(() => new Map(review.Cues.map(c => [ c.Index, c.Text ])), [ review.Cues ]);
-    const editById = useMemo(() => new Map(split.uncertainEdits.map(e => [ e.Id, e ])), [ split.uncertainEdits ]);
-    const nameByName = useMemo(() => new Map(split.uncertainNames.map(n => [ n.Name, n ])), [ split.uncertainNames ]);
-
-    // Server order: by cue index, edits before names on the same cue.
-    const cards = useMemo<PromptCard[]>(() => [
-        ...split.uncertainEdits.map(e => ({ kind: 'edit' as const, cueIndex: e.CueIndex, id: e.Id })),
-        ...split.uncertainNames.map(n => ({ kind: 'name' as const, cueIndex: n.CueIndex, name: n.Name }))
-    ].sort((a, b) => a.cueIndex - b.cueIndex || (a.kind === 'edit' ? -1 : 1)), [ split ]);
-
-    const decideEdit = useCallback((id: number, decision: EditDecision) => {
-        const edit = editById.get(id);
-        const next: ReviewAnswers = {
-            ...answers,
-            edits: { ...answers.edits, [id]: decision },
-            neverAsk: { ...answers.neverAsk }
-        };
-        if (decision === 'reject' && next.neverAsk[id] === undefined && edit) {
-            // Default on when exactly one word changed: that is the moment the user knows the word was fine.
-            next.neverAsk[id] = changedWords(edit.Original, edit.Corrected).length === 1;
-        }
-        onAnswersChange(next);
-    }, [ answers, editById, onAnswersChange ]);
-
-    const setNeverAsk = useCallback((id: number, value: boolean) => {
-        onAnswersChange({ ...answers, neverAsk: { ...answers.neverAsk, [id]: value } });
-    }, [ answers, onAnswersChange ]);
-
-    const decideName = useCallback((name: string, isName: boolean) => {
-        onAnswersChange({ ...answers, names: { ...answers.names, [name]: isName } });
-    }, [ answers, onAnswersChange ]);
+const ReviewTable: FC<ReviewTableProps> = ({
+    jobId, review, decisions, onDecide, namesText, onNamesTextChange, onFinish, isFinishing, error
+}) => {
+    const split = splitReview(review);
 
     return (
         <Stack spacing={2}>
             <Typography variant='h2' component='h2'>{globalize.translate('SubtitleOcrReviewTitle')}</Typography>
-            {review.CorrectorError && <Alert severity='warning'>{review.CorrectorError}</Alert>}
-            {cards.map(card => (card.kind === 'edit' ? (
-                <EditCard
-                    key={`edit-${card.id}`}
-                    edit={editById.get(card.id)!}
-                    decision={answers.edits[card.id]}
-                    neverAsk={answers.neverAsk[card.id] === true}
-                    onDecide={decision => decideEdit(card.id, decision)}
-                    onNeverAskChange={value => setNeverAsk(card.id, value)}
+
+            {split.uncertainLines.map(line => (
+                <UncertainLineCard
+                    key={line.Index}
+                    jobId={jobId}
+                    line={line}
+                    decision={decisions[line.Index]}
+                    onDecide={text => onDecide(line.Index, text)}
                 />
-            ) : (
-                <NameCard
-                    key={`name-${card.name}`}
-                    name={nameByName.get(card.name)!}
-                    cueText={cueText.get(card.cueIndex)}
-                    decision={answers.names[card.name]}
-                    onDecide={isName => decideName(card.name, isName)}
-                />
-            )))}
+            ))}
+
+            <ResolvedLinesList lines={split.resolvedLines} />
+
+            <TextField
+                label={globalize.translate('SubtitleOcrNamesLabel')}
+                placeholder={globalize.translate('SubtitleOcrNamesPlaceholder')}
+                value={namesText}
+                onChange={e => onNamesTextChange(e.target.value)}
+                fullWidth
+                size='small'
+            />
+
             {error && <Alert severity='error'>{error}</Alert>}
+
             <Stack direction='row' justifyContent='flex-end'>
                 <Button
                     variant='contained'
-                    disabled={!isReviewComplete(split, answers) || isFinishing}
+                    disabled={!isReviewComplete(split, decisions) || isFinishing}
                     onClick={onFinish}
                 >
                     {globalize.translate(error ? 'SubtitleOcrRetry' : 'SubtitleOcrFinish')}
@@ -2650,63 +2366,91 @@ const UncertaintyPrompt: FC<UncertaintyPromptProps> = ({ review, answers, onAnsw
     );
 };
 
-export default UncertaintyPrompt;
+export default ReviewTable;
 ```
 
-- [ ] **Step 2: Wire review, auto-accept and completion into the page**
+- [ ] **Step 6: Lint and type check**
 
-In `src/apps/legacy/routes/subtitleOcr.tsx` add imports:
+Run: `npx eslint src/apps/legacy/features/subtitleOcr/components && npm run build:check`
+Expected: clean.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/apps/legacy/features/subtitleOcr/components
+git commit -m "Add review table components: crop images, scored candidates, audit list
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 9: Wire the review into the page — decisions, names, auto-accept and completion
+
+**Files:**
+- Modify: `src/apps/legacy/routes/subtitleOcr.tsx`
+
+**Interfaces:**
+- Consumes: `useReview`, `useAccept` (Task 4), `splitReview`, `buildAcceptRequest` (Task 3), `ReviewTable` (Task 8), `getItemQuery` from `hooks/useItem`, `queryClient` from `utils/query/queryClient`.
+
+- [ ] **Step 1: Add imports**
+
+In `src/apps/legacy/routes/subtitleOcr.tsx` add:
 
 ```tsx
 import { useAccept } from 'apps/legacy/features/subtitleOcr/api/useAccept';
 import { useReview } from 'apps/legacy/features/subtitleOcr/api/useReview';
-import UncertaintyPrompt from 'apps/legacy/features/subtitleOcr/components/UncertaintyPrompt';
-import { buildAcceptRequest, emptyAnswers, type ReviewAnswers, splitReview } from 'apps/legacy/features/subtitleOcr/utils/review';
+import ReviewTable from 'apps/legacy/features/subtitleOcr/components/ReviewTable';
+import { buildAcceptRequest, splitReview } from 'apps/legacy/features/subtitleOcr/utils/review';
 import { getItemQuery } from 'hooks/useItem';
 import { queryClient } from 'utils/query/queryClient';
 ```
 
-After the glyph block add:
+- [ ] **Step 2: Add review state, auto-accept and completion**
+
+After the `const { data: job, isError: isJobError } = useJob(jobId);` line add:
 
 ```tsx
     const isReviewPhase = job?.State === 'AwaitingReview';
     const review = useReview(jobId, isReviewPhase);
     const accept = useAccept(jobId);
-    const [ answers, setAnswers ] = useState<ReviewAnswers>(emptyAnswers);
+    const [ decisions, setDecisions ] = useState<Record<number, string>>({});
+    const [ namesText, setNamesText ] = useState('');
     const split = useMemo(() => (review.data ? splitReview(review.data) : undefined), [ review.data ]);
+
+    const onDecide = useCallback((index: number, text: string) => {
+        setDecisions(prev => ({ ...prev, [index]: text }));
+    }, []);
 
     const finish = useCallback(() => {
         if (!split || accept.isPending) return;
-        accept.mutate(buildAcceptRequest(split, answers));
-    }, [ accept, answers, split ]);
+        accept.mutate(buildAcceptRequest(split, decisions, namesText));
+    }, [ accept, decisions, namesText, split ]);
 
     // Nothing uncertain: accept without showing a review.
     const autoAccepted = useRef<string>();
     useEffect(() => {
         if (isReviewPhase && split?.autoAccept && jobId && autoAccepted.current !== jobId && !accept.isPending && !accept.isError) {
             autoAccepted.current = jobId;
-            if (review.data?.CorrectorError) {
-                toast(review.data.CorrectorError);
-            }
             finish();
         }
-    }, [ accept.isError, accept.isPending, finish, isReviewPhase, jobId, review.data?.CorrectorError, split?.autoAccept ]);
+    }, [ accept.isError, accept.isPending, finish, isReviewPhase, jobId, split?.autoAccept ]);
 
     // Done: tell the user, refresh the item and return to a freshly loaded details page.
     const completed = useRef<string>();
     useEffect(() => {
         if (job?.State !== 'Done' || !jobId || completed.current === jobId) return;
         completed.current = jobId;
-        toast(globalize.translate('SubtitleOcrSaved', accept.data?.SavedCues ?? job.CuesTotal));
+        toast(globalize.translate('SubtitleOcrSaved', accept.data?.SavedCues ?? job.Total));
         void queryClient.invalidateQueries({ queryKey: getItemQuery(undefined, itemId, user?.Id).queryKey });
         const params = new URLSearchParams({ id: itemId || '', serverId: serverId || '' });
         navigate(`/details?${params.toString()}`, { replace: true });
     }, [ accept.data?.SavedCues, itemId, job, jobId, navigate, serverId, user?.Id ]);
 ```
 
-(`serverId` comes from `useSubtitleOcrParams`; add it back to the destructuring.)
+`serverId` comes from `useSubtitleOcrParams`; add it to that destructuring if Task 7 did not already keep it there.
 
-Add the `case 'review':` to the switch:
+- [ ] **Step 3: Add the `review` case to the phase switch**
 
 ```tsx
         case 'review':
@@ -2724,10 +2468,13 @@ Add the `case 'review':` to the switch:
                 );
             } else {
                 content = (
-                    <UncertaintyPrompt
+                    <ReviewTable
+                        jobId={jobId!}
                         review={review.data}
-                        answers={answers}
-                        onAnswersChange={setAnswers}
+                        decisions={decisions}
+                        onDecide={onDecide}
+                        namesText={namesText}
+                        onNamesTextChange={setNamesText}
                         onFinish={finish}
                         isFinishing={accept.isPending}
                         error={accept.isError ? String((accept.error as Error)?.message || accept.error) : null}
@@ -2737,27 +2484,27 @@ Add the `case 'review':` to the switch:
             break;
 ```
 
-The `done` phase renders `<Spinner />` (the effect above navigates away).
+`jobId!` is safe here: reaching the `review` phase requires `hasJobId` to be true (see `phaseFor`). The `done` phase still renders `<Spinner />` (the completion effect above navigates away before it would ever need to render anything else).
 
-- [ ] **Step 3: Lint and type check**
+- [ ] **Step 4: Lint and type check**
 
 Run: `npx eslint src/apps/legacy/routes/subtitleOcr.tsx src/apps/legacy/features/subtitleOcr && npm run build:check`
 Expected: clean.
 
-- [ ] **Step 4: Verify in the browser**
+- [ ] **Step 5: Verify in the browser**
 
-Two runs on the rig server:
+Two runs on the rig server (see the server scoring-pipeline rig, `python tools/subtitle-rig/ocr_cycle.py`):
 
-1. With the Gemini key configured and a disc that yields uncertain items: after glyphs, the "Please check these" list appears with edit cards (struck-through and highlighted words, reason, Accept and Reject; Reject reveals the never-ask checkbox, checked when one word changed) and name cards. Finish stays disabled until every card has an answer. Finishing shows a "Subtitles saved (N cues)" toast, lands on the details page reloaded, where the convert button is gone and the subtitle selector lists the new external SRT.
-2. With `SubtitleOcrCorrectorEnabled` false on the server (so the review has zero edits and names): after glyphs, the card shows "Saving" briefly and then the toast and details page, with no review shown.
+1. A track that yields uncertain lines: after "Recognising text" / "Generating candidates" / "Scoring candidates" / "Checking uncertain lines", the review screen shows one card per uncertain line with its crop image, scored candidate buttons and a free-text field, a "N lines resolved automatically" toggle that expands to a diff list with no network requests for images, and a names field. Finish stays disabled until every uncertain line has a decision. Finishing shows a "Subtitles saved (N cues)" toast, lands on the details page reloaded, where the convert button is gone and the subtitle selector lists the new external SRT.
+2. A track where every line comes back `certain` or `adjudicated`: the page goes straight from progress to "Saving" to the toast and details page, with no review screen shown at all.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add src/apps/legacy/routes/subtitleOcr.tsx src/apps/legacy/features/subtitleOcr
-git commit -m "Add uncertainty review with auto-accept for subtitle OCR
+git add src/apps/legacy/routes/subtitleOcr.tsx
+git commit -m "Wire the review table into the page: decisions, names, auto-accept
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
 ```
 
 ---
@@ -2994,7 +2741,7 @@ Expected: clean.
 - [ ] **Step 7: Verify in the browser**
 
 1. Point the dev client at a Jellyfin server without the OCR feature (or temporarily change the route path in `request.ts` to `/SubtitleOcrX`, then revert): the button still shows for admins; tapping Convert yields "This server does not support subtitle conversion." with Back only.
-2. Delete the cached `.sup` under the rig server's subtitle cache while a job waits for glyphs, then restart the server: the page shows the failure card with the server's message and Retry starts a new job that extracts again.
+2. Stop the `ocr-sidecar` container while a job is `Recognising`, then restart Jellyfin: the page shows the failure card with the server's message ("sidecar restarted, start again") and Retry starts a new job that extracts again.
 3. Start a job, note the URL, stop the server, delete `<data>/subtitle-ocr/jobs/<jobId>.json`, start the server, reload the page URL: the page drops `jobId` and starts a fresh job automatically.
 
 - [ ] **Step 8: Commit**
@@ -3193,13 +2940,13 @@ Expected: all tests pass, no lint output, tsc and the production build succeed.
 
 - [ ] **Step 2: Pixel 8 viewport manual pass**
 
-In the browser's device emulation, select or enter the Pixel 8 preset (412 × 915 CSS pixels, touch enabled), and run the full flow from the details page button through glyphs and the uncertainty list to the toast and reloaded details page, against the Bitmap movie's English-language PGS track.
-Expected: no horizontal scrolling; the cue image fits the width; candidate buttons wrap; the text field is not focused on load; the Finish button is reachable below the last card. Repeat once at desktop width. Also open Dashboard → Playback → Transcoding at phone width and confirm the three burned-in subtitle fields stack without overflow.
+In the browser's device emulation, select or enter the Pixel 8 preset (412 × 915 CSS pixels, touch enabled), and run the full flow from the details page button through the review table to the toast and reloaded details page, against the Bitmap movie's English-language PGS track.
+Expected: no horizontal scrolling; crop images fit the width; candidate buttons wrap; the free-text field is not focused on load on touch layouts; the Finish button is reachable below the last card; the "N lines resolved automatically" toggle expands without layout shift. Repeat once at desktop width. Also open Dashboard → Playback → Transcoding at phone width and confirm the three burned-in subtitle fields stack without overflow.
 
 - [ ] **Step 3: Danish-language pass**
 
-Repeat the flow at the Pixel 8 viewport against a Danish-language bitmap track (the rig's `make_media.py` can mux a second PGS or VobSub track from a Danish SRT containing æ, ø and å; if none is available, type `æ`, `ø` and `å` into the glyph free-text field during an English-track run to confirm entry and display).
-Expected: the cue image, letter crop and candidate buttons render the Danish letters correctly; typing `æ`, `ø` or `å` in the text field submits and is learned like any other glyph; a corrected cue containing these letters renders correctly in the uncertainty list's diff view. Since `eng_OCRFixReplaceList.xml` fixes are English-specific, the server plan (Task 9) applies them only to tracks whose language starts with `en`; confirm no corrected cue on the Danish track looks like an English-word substitution.
+Repeat the flow at the Pixel 8 viewport against a Danish-language bitmap track (the server's scoring pipeline runs Tesseract `dan` with the `da_DK` lexicon for it; the rig's `make_media.py` can mux a second PGS or VobSub track from a Danish SRT containing æ, ø and å; if none is available, type `æ`, `ø` and `å` into an uncertain line's free-text field during an English-track run to confirm entry and display).
+Expected: crop images and candidate text render the Danish letters correctly; typing `æ`, `ø` or `å` in the free-text field submits correctly; the collapsed resolved-lines list renders them correctly too. The server no longer applies any English-specific fix list to non-English tracks (that whole mechanism was dropped with the nOCR engine), so there is nothing English-specific left to check for on this track.
 
 - [ ] **Step 4: Update the spec status and commit**
 
@@ -3209,5 +2956,5 @@ Change the spec's `Status:` line to `Status: implemented on branch feature/subti
 git add docs/superpowers/specs/2026-09-28-subtitle-ocr-page-design.md
 git commit -m "Mark subtitle OCR page spec as implemented
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
 ```
