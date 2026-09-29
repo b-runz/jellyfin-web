@@ -1,9 +1,9 @@
+import Button from '@mui/material/Button';
 import Collapse from '@mui/material/Collapse';
 import List from '@mui/material/List';
 import ListItem from '@mui/material/ListItem';
 import ListItemText from '@mui/material/ListItemText';
 import Tooltip from '@mui/material/Tooltip';
-import Typography from '@mui/material/Typography';
 import React, { type FC, useCallback, useState } from 'react';
 
 import globalize from 'lib/globalize';
@@ -29,13 +29,16 @@ const ResolvedLinesList: FC<ResolvedLinesListProps> = ({ lines }) => {
 
     return (
         <>
-            <Typography
-                variant='body2'
-                sx={{ cursor: 'pointer', textDecoration: 'underline' }}
+            <Button
+                variant='text'
+                size='small'
+                sx={{ textDecoration: 'underline' }}
                 onClick={toggleOpen}
+                aria-expanded={open}
+                aria-label={globalize.translate('SubtitleOcrShowResolved')}
             >
                 {globalize.translate('SubtitleOcrResolvedCount', lines.length)}
-            </Typography>
+            </Button>
             <Collapse in={open}>
                 <List dense>
                     {lines.map(line => (

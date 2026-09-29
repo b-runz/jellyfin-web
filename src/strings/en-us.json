@@ -1676,6 +1676,7 @@
     "SubtitleOcrSaved": "Subtitles saved ({0} cues)",
     "SubtitleOcrSaving": "Saving",
     "SubtitleOcrScoringCandidates": "Scoring candidates",
+    "SubtitleOcrShowResolved": "Show resolved lines",
     "SubtitleOcrTitle": "Convert subtitles",
     "SubtitleOcrTypeCorrection": "Type a correction",
     "SubtitleOcrUploading": "Uploading to the OCR service",
