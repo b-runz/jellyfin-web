@@ -143,7 +143,7 @@ languages as equal. Result order follows the media source and stream order.
 | Job in `AwaitingGlyph` | `GlyphPrompt` |
 | Job in `AwaitingReview`, uncertain items present | `UncertaintyPrompt` |
 | Job in `AwaitingReview`, nothing uncertain | Accept is posted; `JobProgress` shows "Saving" |
-| Job `Done` | Toast "Subtitles saved" with `SavedCues`, invalidate item queries, navigate back |
+| Job `Done` | Toast "Subtitles saved" with `SavedCues`, invalidate item queries, replace the current history entry with the details route so it loads fresh (a plain back would restore the cached details view and the button would linger) |
 | Job `Failed` | `JobFailed` with the message and Retry |
 
 When a job starts, `jobId` is written into the URL with `replace`, so a
