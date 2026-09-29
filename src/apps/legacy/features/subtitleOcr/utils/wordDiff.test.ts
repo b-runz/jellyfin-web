@@ -85,4 +85,8 @@ describe('changedWords', () => {
     it('returns an empty list for identical text', () => {
         expect(changedWords('same', 'same')).toEqual([]);
     });
+
+    it('strips punctuation but keeps Danish letters attached (æ/ø/å)', () => {
+        expect(changedWords('Hej være.', 'Hej være!')).toEqual([ 'være' ]);
+    });
 });
