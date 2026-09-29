@@ -38,6 +38,8 @@ import { download } from 'scripts/fileDownloader';
 import libraryMenu from 'scripts/libraryMenu';
 import * as userSettings from 'scripts/settings/userSettings';
 import Dashboard from 'utils/dashboard';
+import { ITEM_ID_PARAM, ROUTE_PATH, SERVER_ID_PARAM } from 'apps/legacy/features/subtitleOcr/constants';
+import { eligibleTracks } from 'apps/legacy/features/subtitleOcr/utils/eligibleTracks';
 import Events from 'utils/events';
 import { getItemBackdropImageUrl } from 'utils/jellyfin-apiclient/backdropImage';
 import { OutboundWebSocketMessageType } from '@jellyfin/sdk/lib/websocket';
@@ -597,6 +599,11 @@ function reloadFromItem(instance, page, params, item, user) {
     } else {
         page.querySelector('.btnSplitVersions').classList.add('hide');
     }
+
+    const canConvertSubtitles = user.Policy.IsAdministrator
+        && itemHelper.canEditSubtitles(user, item)
+        && eligibleTracks(item).length > 0;
+    hideAll(page, 'btnSubtitleOcr', canConvertSubtitles);
 
     itemContextMenu.getCommands(getContextMenuOptions(item, user)).then(commands => {
         if (commands.length) {
@@ -2054,6 +2061,14 @@ export default function (view, params) {
         }]);
     }
 
+    function onSubtitleOcrClick() {
+        const queryParams = new URLSearchParams({
+            [ITEM_ID_PARAM]: currentItem.Id,
+            [SERVER_ID_PARAM]: currentItem.ServerId
+        });
+        Dashboard.navigate(`${ROUTE_PATH}?${queryParams.toString()}`);
+    }
+
     function onMoreCommandsClick() {
         const button = this;
         let selectedItem = view.querySelector('.selectSource').value || currentItem.Id;
@@ -2120,6 +2135,7 @@ export default function (view, params) {
         bindAll(view, '.btnCancelSeriesTimer', 'click', onCancelSeriesTimerClick);
         bindAll(view, '.btnCancelTimer', 'click', onCancelTimerClick);
         bindAll(view, '.btnDownload', 'click', onDownloadClick);
+        bindAll(view, '.btnSubtitleOcr', 'click', onSubtitleOcrClick);
         view.querySelector('.trackSelections').addEventListener('submit', onTrackSelectionsSubmit);
         view.querySelector('.btnSplitVersions').addEventListener('click', function () {
             splitVersions(self, view, apiClient, params);
