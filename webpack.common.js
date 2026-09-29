@@ -197,11 +197,7 @@ const config = {
                     path.resolve(__dirname, 'node_modules/@jellyfin/sdk'),
                     path.resolve(__dirname, 'node_modules/@mui/base'),
                     path.resolve(__dirname, 'node_modules/@mui/lab'),
-                    path.resolve(__dirname, 'node_modules/@mui/material'),
-                    path.resolve(__dirname, 'node_modules/@mui/private-theming'),
                     path.resolve(__dirname, 'node_modules/@mui/styled-engine'),
-                    path.resolve(__dirname, 'node_modules/@mui/system'),
-                    path.resolve(__dirname, 'node_modules/@mui/utils'),
                     path.resolve(__dirname, 'node_modules/@mui/x-date-pickers'),
                     path.resolve(__dirname, 'node_modules/@react-hook/latest'),
                     path.resolve(__dirname, 'node_modules/@react-hook/passive-layout-effect'),
@@ -252,9 +248,21 @@ const config = {
                 }]
             },
             // Strict EcmaScript modules require additional flags
+            //
+            // @mui/system and @mui/private-theming ship ESM builds (esm/**/*.js) that use
+            // bare, extensionless imports of @mui/utils subpaths (e.g. '@mui/utils/capitalize').
+            // The installed @mui/utils has no "exports" map, so webpack 5's strict ESM
+            // resolution refuses to resolve those specifiers unless fullySpecified is
+            // disabled for the importing files. @mui/material and @mui/utils are included
+            // here too since they are closely related packages that can hit the same failure
+            // mode as new versions are installed.
             {
                 test: /\.(js|jsx|mjs)$/,
                 include: [
+                    path.resolve(__dirname, 'node_modules/@mui/material'),
+                    path.resolve(__dirname, 'node_modules/@mui/private-theming'),
+                    path.resolve(__dirname, 'node_modules/@mui/system'),
+                    path.resolve(__dirname, 'node_modules/@mui/utils'),
                     path.resolve(__dirname, 'node_modules/@tanstack/query-devtools')
                 ],
                 resolve: {
