@@ -1,29 +1,128 @@
 import CircularProgress from '@mui/material/CircularProgress';
 import Container from '@mui/material/Container';
-import React, { type FC, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { type FC, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 
+import { statusOf } from 'apps/legacy/features/subtitleOcr/api/request';
 import { useAccept } from 'apps/legacy/features/subtitleOcr/api/useAccept';
 import { useCancelJob } from 'apps/legacy/features/subtitleOcr/api/useCancelJob';
 import { useJob } from 'apps/legacy/features/subtitleOcr/api/useJob';
 import { useReview } from 'apps/legacy/features/subtitleOcr/api/useReview';
 import { useStartJob } from 'apps/legacy/features/subtitleOcr/api/useStartJob';
+import JobFailed from 'apps/legacy/features/subtitleOcr/components/JobFailed';
 import JobProgress from 'apps/legacy/features/subtitleOcr/components/JobProgress';
 import NothingToConvert from 'apps/legacy/features/subtitleOcr/components/NothingToConvert';
 import ReviewTable from 'apps/legacy/features/subtitleOcr/components/ReviewTable';
 import TrackPicker from 'apps/legacy/features/subtitleOcr/components/TrackPicker';
 import { ITEM_ID_PARAM, JOB_ID_PARAM, SERVER_ID_PARAM } from 'apps/legacy/features/subtitleOcr/constants';
 import { useLeaveGuard } from 'apps/legacy/features/subtitleOcr/hooks/useLeaveGuard';
-import type { EligibleTrack } from 'apps/legacy/features/subtitleOcr/types';
+import type { EligibleTrack, OcrJob } from 'apps/legacy/features/subtitleOcr/types';
 import { eligibleTracks } from 'apps/legacy/features/subtitleOcr/utils/eligibleTracks';
-import { isJobActive, phaseFor } from 'apps/legacy/features/subtitleOcr/utils/phase';
-import { buildAcceptRequest, splitReview } from 'apps/legacy/features/subtitleOcr/utils/review';
+import { nextStepAfterJobError, startErrorMessage } from 'apps/legacy/features/subtitleOcr/utils/errors';
+import { type Phase, isJobActive, phaseFor } from 'apps/legacy/features/subtitleOcr/utils/phase';
+import { buildAcceptRequest, type SplitReview, splitReview } from 'apps/legacy/features/subtitleOcr/utils/review';
 import Page from 'components/Page';
 import toast from 'components/toast/toast';
 import { useApi } from 'hooks/useApi';
 import { getItemQuery, useItem } from 'hooks/useItem';
 import globalize from 'lib/globalize';
 import { queryClient } from 'utils/query/queryClient';
+
+const Spinner: FC = () => <CircularProgress sx={{ display: 'block', mx: 'auto', my: 4 }} />;
+
+interface ContentArgs {
+    startJob: ReturnType<typeof useStartJob>;
+    cancelJob: ReturnType<typeof useCancelJob>;
+    phase: Phase;
+    tracks: EligibleTrack[];
+    job?: OcrJob;
+    isJobError: boolean;
+    review: ReturnType<typeof useReview>;
+    split?: SplitReview;
+    jobId?: string;
+    decisions: Record<number, string>;
+    namesText: string;
+    accept: ReturnType<typeof useAccept>;
+    start: (track: EligibleTrack) => void;
+    onDecide: (index: number, text: string) => void;
+    onNamesTextChange: (text: string) => void;
+    finish: () => void;
+    onCancelClick: () => void;
+    retry: () => void;
+    goBack: () => void;
+}
+
+/** Picks the content for the current phase, short-circuiting to the failure view for a failed start. */
+const resolveContent = ({
+    startJob, cancelJob, phase, tracks, job, isJobError, review, split, jobId,
+    decisions, namesText, accept, start, onDecide, onNamesTextChange, finish, onCancelClick, retry, goBack
+// eslint-disable-next-line sonarjs/function-return-type -- genuinely returns a mix of JSX nodes across phases
+}: ContentArgs): ReactNode => {
+    if (startJob.isError) {
+        return (
+            <JobFailed
+                message={globalize.translate(startErrorMessage(startJob.error))}
+                onRetry={statusOf(startJob.error) === 404 ? undefined : retry}
+                onBack={goBack}
+                isRetrying={startJob.isPending}
+            />
+        );
+    }
+
+    switch (phase) {
+        case 'nothing':
+            return <NothingToConvert onBack={goBack} />;
+        case 'pick':
+            return <TrackPicker tracks={tracks} onSelect={start} disabled={startJob.isPending} />;
+        case 'progress':
+            return (
+                <JobProgress
+                    job={job}
+                    isReconnecting={isJobError}
+                    onCancel={onCancelClick}
+                    isCancelling={cancelJob.isPending}
+                />
+            );
+        case 'review':
+            if (!review.data || !split) return <Spinner />;
+            if (split.autoAccept) {
+                return (
+                    <JobProgress
+                        job={job}
+                        isReconnecting={false}
+                        labelKeyOverride='SubtitleOcrSaving'
+                        onCancel={onCancelClick}
+                        isCancelling={cancelJob.isPending}
+                    />
+                );
+            }
+            return (
+                <ReviewTable
+                    jobId={jobId!}
+                    review={review.data}
+                    decisions={decisions}
+                    onDecide={onDecide}
+                    namesText={namesText}
+                    onNamesTextChange={onNamesTextChange}
+                    onFinish={finish}
+                    isFinishing={accept.isPending}
+                    error={accept.isError ? String((accept.error as Error)?.message || accept.error) : null}
+                />
+            );
+        case 'failed':
+            return (
+                <JobFailed
+                    job={job}
+                    onRetry={retry}
+                    onBack={goBack}
+                    isRetrying={startJob.isPending}
+                />
+            );
+        default:
+            // done is added in a following task.
+            return <Spinner />;
+    }
+};
 
 const useSubtitleOcrParams = () => {
     const [ searchParams, setSearchParams ] = useSearchParams();
@@ -46,8 +145,6 @@ const useSubtitleOcrParams = () => {
     };
 };
 
-const Spinner: FC = () => <CircularProgress sx={{ display: 'block', mx: 'auto', my: 4 }} />;
-
 const SubtitleOcr: FC = () => {
     const navigate = useNavigate();
     const { user } = useApi();
@@ -57,7 +154,19 @@ const SubtitleOcr: FC = () => {
 
     const startJob = useStartJob();
     const cancelJob = useCancelJob();
-    const { data: job, isError: isJobError } = useJob(jobId);
+    const { data: job, isError: isJobError, error: jobError } = useJob(jobId);
+
+    // Exactly one eligible track: start without asking. Also gates the lost-job recovery
+    // below, so it must be declared before that effect.
+    const autoStarted = useRef(false);
+
+    // The server no longer knows this job (restart discarded it): drop the id and let the normal start flow run.
+    useEffect(() => {
+        if (isJobError && nextStepAfterJobError(statusOf(jobError)) === 'restart') {
+            autoStarted.current = false;
+            setJobId();
+        }
+    }, [ isJobError, jobError, setJobId ]);
 
     const isReviewPhase = job?.State === 'AwaitingReview';
     const review = useReview(jobId, isReviewPhase);
@@ -105,8 +214,16 @@ const SubtitleOcr: FC = () => {
 
     const goBack = useCallback(() => navigate(-1), [ navigate ]);
 
+    // Remembers the last started track so Retry can reuse it without asking again.
+    const lastTrack = useRef<EligibleTrack>();
+
     const start = useCallback((track: EligibleTrack) => {
         if (!itemId || startJob.isPending) return;
+        lastTrack.current = track;
+        // Clear any stale result from a previous job's auto-accept, so this job's own
+        // auto-accept effect (below) is not blocked by an error that belongs to a job that
+        // is no longer mounted.
+        accept.reset();
         startJob.mutate({
             ItemId: itemId,
             MediaSourceId: track.mediaSourceId,
@@ -114,16 +231,25 @@ const SubtitleOcr: FC = () => {
         }, {
             onSuccess: started => setJobId(started.Id)
         });
-    }, [ itemId, setJobId, startJob ]);
+    }, [ accept, itemId, setJobId, startJob ]);
 
     // Exactly one eligible track: start without asking.
-    const autoStarted = useRef(false);
     useEffect(() => {
         if (!jobId && tracks.length === 1 && !autoStarted.current && user && isAdmin) {
             autoStarted.current = true;
             start(tracks[0]);
         }
     }, [ isAdmin, jobId, start, tracks, user ]);
+
+    // Starts a fresh job for the same track after a failure, since the old job is terminal
+    // (or, on a 404, already gone).
+    const retry = useCallback(() => {
+        const track = lastTrack.current || tracks.find(t => t.mediaSourceId === job?.MediaSourceId && t.streamIndex === job?.StreamIndex) || tracks[0];
+        if (!track) return;
+        setJobId();
+        startJob.reset();
+        start(track);
+    }, [ job?.MediaSourceId, job?.StreamIndex, setJobId, start, startJob, tracks ]);
 
     const cancelCurrentJob = useCallback(async () => {
         if (jobId && isJobActive(job?.State)) {
@@ -144,57 +270,27 @@ const SubtitleOcr: FC = () => {
 
     const phase = phaseFor({ hasJobId: !!jobId, job, trackCount: tracks.length, itemLoaded: !!user && !isItemPending && !!item });
 
-    let content;
-    switch (phase) {
-        case 'nothing':
-            content = <NothingToConvert onBack={goBack} />;
-            break;
-        case 'pick':
-            content = <TrackPicker tracks={tracks} onSelect={start} disabled={startJob.isPending} />;
-            break;
-        case 'progress':
-            content = (
-                <JobProgress
-                    job={job}
-                    isReconnecting={isJobError}
-                    onCancel={onCancelClick}
-                    isCancelling={cancelJob.isPending}
-                />
-            );
-            break;
-        case 'review':
-            if (!review.data || !split) {
-                content = <Spinner />;
-            } else if (split.autoAccept) {
-                content = (
-                    <JobProgress
-                        job={job}
-                        isReconnecting={false}
-                        labelKeyOverride='SubtitleOcrSaving'
-                        onCancel={onCancelClick}
-                        isCancelling={cancelJob.isPending}
-                    />
-                );
-            } else {
-                content = (
-                    <ReviewTable
-                        jobId={jobId!}
-                        review={review.data}
-                        decisions={decisions}
-                        onDecide={onDecide}
-                        namesText={namesText}
-                        onNamesTextChange={setNamesText}
-                        onFinish={finish}
-                        isFinishing={accept.isPending}
-                        error={accept.isError ? String((accept.error as Error)?.message || accept.error) : null}
-                    />
-                );
-            }
-            break;
-        default:
-            // done and failed are added in the following tasks.
-            content = <Spinner />;
-    }
+    const content = resolveContent({
+        startJob,
+        cancelJob,
+        phase,
+        tracks,
+        job,
+        isJobError,
+        review,
+        split,
+        jobId,
+        decisions,
+        namesText,
+        accept,
+        start,
+        onDecide,
+        onNamesTextChange: setNamesText,
+        finish,
+        onCancelClick,
+        retry,
+        goBack
+    });
 
     return (
         <Page
