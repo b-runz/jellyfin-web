@@ -319,14 +319,19 @@ Unit tests (vitest, beside the utilities):
   all certain names; mixed lists; rejected edit ids; never-ask collection;
   accepted uncertain names added to certain names.
 
-Manual passes against the rig server, on a phone-sized viewport and on
-desktop:
+Manual passes against the rig server, on the Pixel 8 viewport (412 × 915 CSS
+pixels) and on desktop, always signed in as the administrator (the page and
+its button are admin-gated; no separate pass as another user type is
+needed):
 
 1. A disc that needs glyph answers and yields uncertain edits: full flow
    through both prompts to a saved SRT; the details page button disappears.
 2. A disc where everything is certain: progress straight to "Subtitles saved".
 3. Refresh during the glyph phase rejoins the job; back button mid-job asks
    and cancels; stopping the server mid-poll shows Reconnecting and recovers.
+4. A Danish-language bitmap track: glyph images and candidates render æ, ø
+   and å correctly, typing them in the free-text field works, and a
+   corrected cue containing them renders correctly in the uncertainty list.
 
 Rig integration (jellyfin repository, separate change): the container build
 copies a jellyfin-web production build into the web directory when a path is

@@ -1463,7 +1463,7 @@ Expected: clean.
 - [ ] **Step 6: Verify the route renders in the dev server**
 
 Run: `npm start` (webpack dev server on http://localhost:8080). In a browser, connect to the rig server, sign in as the admin, then open `http://localhost:8080/#/subtitleocr?itemId=<id of the Bitmap movie>&serverId=<server id>` (the ids are visible in the details page URL `#/details?id=...&serverId=...`).
-Expected: the page titled "Convert subtitles" shows a track picker listing the PGS track with a Convert button. For an item without bitmap tracks the "nothing to convert" card appears with Back. Signed in as a non-admin the page toasts and lands on home.
+Expected: the page titled "Convert subtitles" shows a track picker listing the PGS track with a Convert button. For an item without bitmap tracks the "nothing to convert" card appears with Back. (The page is only reachable through the button, which is itself admin-gated in Task 6, so no separate non-admin pass is needed here.)
 
 - [ ] **Step 7: Commit**
 
@@ -1542,7 +1542,7 @@ Expected: clean.
 - [ ] **Step 4: Verify in the browser**
 
 With `npm start` running and signed in as admin, open the Bitmap movie's details page.
-Expected: a `document_scanner` icon button appears after Download with the tooltip "Convert subtitles to text" and tapping it opens the page from Task 5 with the track picker. On a movie with only text subtitles the button is absent. Signed in as a non-admin the button is absent. If the icon renders as a box with text, the font lacks that glyph: switch the class to `text_fields` in both this step and the spec.
+Expected: a `document_scanner` icon button appears after Download with the tooltip "Convert subtitles to text" and tapping it opens the page from Task 5 with the track picker. On a movie with only text subtitles the button is absent. All manual passes in this plan are run signed in as the admin; the code still checks `IsAdministrator` as a safety net, but a separate non-admin pass is not part of this plan. If the icon renders as a box with text, the font lacks that glyph: switch the class to `text_fields` in both this step and the spec.
 
 - [ ] **Step 5: Commit**
 
@@ -3008,7 +3008,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 ---
 
-### Task 11: Full pass, phone viewport check and spec status
+### Task 11: Full pass, Pixel 8 viewport check and spec status
 
 **Files:**
 - Modify: `docs/superpowers/specs/2026-09-28-subtitle-ocr-page-design.md` (the `Status:` line)
@@ -3024,15 +3024,15 @@ npm run build:production
 
 Expected: all tests pass, no lint output, tsc and the production build succeed.
 
-- [ ] **Step 2: Phone-sized manual pass**
+- [ ] **Step 2: Pixel 8 viewport manual pass**
 
-In the browser's device emulation at 390 × 844 with touch enabled, run the full flow from the details page button through glyphs and the uncertainty list to the toast and reloaded details page.
+In the browser's device emulation, select or enter the Pixel 8 preset (412 × 915 CSS pixels, touch enabled), and run the full flow from the details page button through glyphs and the uncertainty list to the toast and reloaded details page, against the Bitmap movie's English-language PGS track.
 Expected: no horizontal scrolling; the cue image fits the width; candidate buttons wrap; the text field is not focused on load; the Finish button is reachable below the last card. Repeat once at desktop width.
 
-- [ ] **Step 3: Android app pass**
+- [ ] **Step 3: Danish-language pass**
 
-Open the rig server from the Android app (the WebView loads this build once the server's web directory points at `dist/`; see the server rig note in the spec's Testing section). Run the flow once on a movie with a PGS track.
-Expected: same behaviour as the phone emulation; the hardware back button while a job runs shows the leave confirmation.
+Repeat the flow at the Pixel 8 viewport against a Danish-language bitmap track (the rig's `make_media.py` can mux a second PGS or VobSub track from a Danish SRT containing æ, ø and å; if none is available, type `æ`, `ø` and `å` into the glyph free-text field during an English-track run to confirm entry and display).
+Expected: the cue image, letter crop and candidate buttons render the Danish letters correctly; typing `æ`, `ø` or `å` in the text field submits and is learned like any other glyph; a corrected cue containing these letters renders correctly in the uncertainty list's diff view. Since `eng_OCRFixReplaceList.xml` fixes are English-specific, the server plan (Task 9) applies them only to tracks whose language starts with `en`; confirm no corrected cue on the Danish track looks like an English-word substitution.
 
 - [ ] **Step 4: Update the spec status and commit**
 
