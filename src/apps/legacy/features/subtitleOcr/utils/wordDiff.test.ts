@@ -89,4 +89,12 @@ describe('changedWords', () => {
     it('strips punctuation but keeps Danish letters attached (æ/ø/å)', () => {
         expect(changedWords('Hej være.', 'Hej være!')).toEqual([ 'være' ]);
     });
+
+    // Regression guard for the Latin Extended range in stripPunctuation: æ/ø/å must not be
+    // stripped even when they sit at the very start/end of a changed word (not just its
+    // interior). A plain ASCII-only character class (`[^a-zA-Z0-9]`) would incorrectly strip
+    // the leading "å" and trailing "." together here, turning "på" into "p".
+    it('keeps a Danish letter at a word boundary attached (på)', () => {
+        expect(changedWords('Jeg bor på.', 'Jeg bor i.')).toEqual([ 'på' ]);
+    });
 });
