@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add a `subtitleocr` React page to jellyfin-web, reached from a new button on the movie details page, that drives the server's bitmap subtitle OCR job and prompts the administrator only for unknown glyphs and uncertain corrections.
+**Goal:** Add a `subtitleocr` React page to jellyfin-web, reached from a new button on the movie details page, that drives the server's bitmap subtitle OCR job and prompts the administrator only for unknown glyphs and uncertain corrections. Also expose the server's new burned-in subtitle settings (on/off, font size, outline width) on the dashboard's Transcoding page, so the SRTs this page produces render at a size the administrator can control.
 
-**Architecture:** A feature folder `src/apps/legacy/features/subtitleOcr/` holds typed react-query hooks over the `/SubtitleOcr` routes, pure utilities (eligibility, word diff, review splitting) with vitest tests, and MUI components for each phase. A page file `src/apps/legacy/routes/subtitleOcr.tsx` reads `itemId`, `serverId` and `jobId` from the query string and renders the component matching the job state. The legacy details page controller gains one button that navigates to the route.
+**Architecture:** A feature folder `src/apps/legacy/features/subtitleOcr/` holds typed react-query hooks over the `/SubtitleOcr` routes, pure utilities (eligibility, word diff, review splitting) with vitest tests, and MUI components for each phase. A page file `src/apps/legacy/routes/subtitleOcr.tsx` reads `itemId`, `serverId` and `jobId` from the query string and renders the component matching the job state. The legacy details page controller gains one button that navigates to the route. Separately, `src/apps/dashboard/routes/playback/transcoding.tsx` gains a "Burned-in subtitles" block bound to three `EncodingOptions` properties added by the server branch `feature/subtitle-burn-in-engine`, typed through a small local extension of the SDK's `EncodingOptions`.
 
 **Tech Stack:** React 18, react-router-dom 6.30 (`useSearchParams`, `useNavigate`, `useBlocker`), `@tanstack/react-query` 5, `@jellyfin/sdk` `Api` (axios) via `hooks/useApi`, MUI 6 (`@mui/material`), vitest 3 with jsdom, ESLint with `@stylistic` (4-space indent, single quotes, no trailing commas).
 
@@ -3008,7 +3008,174 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 ---
 
-### Task 11: Full pass, Pixel 8 viewport check and spec status
+### Task 11: Burned-in subtitle settings on the transcoding dashboard page
+
+**Files:**
+- Create: `src/apps/dashboard/features/playback/types/encodingOptions.ts`
+- Modify: `src/apps/dashboard/routes/playback/transcoding.tsx` (imports ~line 24, `action` ~line 39, `Component` state ~lines 54-55, form block after the `EnableSubtitleExtraction` `FormControl` ~line 240)
+- Modify: `src/strings/en-us.json` (seven keys, inserted directly after the `"LabelBurnSubtitles"` line, ~line 678)
+
+**Interfaces:**
+- Consumes: the server's `EncodingOptions` JSON from `GET/POST /System/Configuration/encoding`, which on servers built from the `feature/subtitle-burn-in-engine` branch carries `BurnInTextSubtitles: boolean` (default `true`), `BurnInSubtitleFontSize1080p: number` (default 48, accepted 8..200) and `BurnInSubtitleOutlineWidth1080p: number` (default 2, accepted 0..20). Out-of-range values are clamped to the default by the server with a warning, so the page validates only with `min`/`max`. The page's existing `useNamedConfiguration('encoding')`, `onConfigChange`, `onCheckboxChange`, `onSubmit` and `action` are reused unchanged; `onConfigChange` stores number inputs as strings and the server accepts numbers from strings, exactly as the existing `VppTonemappingBrightness` field relies on.
+- Produces: `ExtendedEncodingOptions` type used by the page; nothing else depends on this task.
+
+Why a local type: the bundled `@jellyfin/sdk` was generated before the server change, so `EncodingOptions` has no burn-in members and `config.BurnInTextSubtitles` would not compile under `tsc`. The extension type disappears when the SDK is regenerated.
+
+- [ ] **Step 1: Add the extension type**
+
+`src/apps/dashboard/features/playback/types/encodingOptions.ts`:
+
+```ts
+import type { EncodingOptions } from '@jellyfin/sdk/lib/generated-client/models/encoding-options';
+
+/**
+ * Server encoding options that are newer than the bundled SDK.
+ * Added by the server branch feature/subtitle-burn-in-engine; remove once the SDK is regenerated.
+ */
+export interface BurnInEncodingOptions {
+    /** Burn text subtitles (srt, vtt, mov_text) into the video by default. Server default: true. */
+    BurnInTextSubtitles?: boolean;
+    /** Font size in pixels on a 1080p frame, scaled for other resolutions. Server accepts 8..200, default 48. */
+    BurnInSubtitleFontSize1080p?: number;
+    /** Outline width in pixels on a 1080p frame. Server accepts 0..20, default 2. */
+    BurnInSubtitleOutlineWidth1080p?: number;
+}
+
+export type ExtendedEncodingOptions = EncodingOptions & BurnInEncodingOptions;
+
+export const BURN_IN_FONT_SIZE_MIN = 8;
+export const BURN_IN_FONT_SIZE_MAX = 200;
+export const BURN_IN_OUTLINE_MIN = 0;
+export const BURN_IN_OUTLINE_MAX = 20;
+```
+
+- [ ] **Step 2: Verify the type check fails before the page uses the type**
+
+Add the form block from Step 4 to `transcoding.tsx` first (it references `config.BurnInTextSubtitles`), then run: `npm run build:check`
+Expected: FAIL with `Property 'BurnInTextSubtitles' does not exist on type 'EncodingOptions'`. This is the RED step; Step 3 turns it green.
+
+- [ ] **Step 3: Switch the page to the extended type**
+
+In `src/apps/dashboard/routes/playback/transcoding.tsx`:
+
+Replace the import
+```ts
+import type { EncodingOptions } from '@jellyfin/sdk/lib/generated-client/models/encoding-options';
+```
+with
+```ts
+import { BURN_IN_FONT_SIZE_MAX, BURN_IN_FONT_SIZE_MIN, BURN_IN_OUTLINE_MAX, BURN_IN_OUTLINE_MIN, type ExtendedEncodingOptions } from 'apps/dashboard/features/playback/types/encodingOptions';
+```
+
+and change the three type usages:
+```ts
+    const data = await request.json() as ExtendedEncodingOptions;
+```
+```ts
+    const { data: initialConfig, isPending, isError } = useNamedConfiguration<ExtendedEncodingOptions>(CONFIG_KEY);
+    const [ config, setConfig ] = useState<ExtendedEncodingOptions | null>(null);
+```
+
+- [ ] **Step 4: Add the form block**
+
+Directly after the `FormControl` that contains the `EnableSubtitleExtraction` checkbox (it ends with `<FormHelperText>{globalize.translate('AllowOnTheFlySubtitleExtractionHelp')}</FormHelperText>` and `</FormControl>`), insert:
+
+```tsx
+                            <Typography variant='h3'>{globalize.translate('HeaderBurnedInSubtitles')}</Typography>
+
+                            <FormControl>
+                                <FormControlLabel
+                                    label={globalize.translate('LabelBurnInTextSubtitles')}
+                                    control={
+                                        <Checkbox
+                                            name='BurnInTextSubtitles'
+                                            checked={config.BurnInTextSubtitles ?? true}
+                                            onChange={onCheckboxChange}
+                                        />
+                                    }
+                                />
+                                <FormHelperText>{globalize.translate('LabelBurnInTextSubtitlesHelp')}</FormHelperText>
+                            </FormControl>
+
+                            <TextField
+                                name='BurnInSubtitleFontSize1080p'
+                                value={config.BurnInSubtitleFontSize1080p ?? 48}
+                                onChange={onConfigChange}
+                                label={globalize.translate('LabelBurnInSubtitleFontSize')}
+                                helperText={globalize.translate('LabelBurnInSubtitleFontSizeHelp')}
+                                type='number'
+                                slotProps={{
+                                    htmlInput: {
+                                        min: BURN_IN_FONT_SIZE_MIN,
+                                        max: BURN_IN_FONT_SIZE_MAX,
+                                        step: 1
+                                    }
+                                }}
+                            />
+
+                            <TextField
+                                name='BurnInSubtitleOutlineWidth1080p'
+                                value={config.BurnInSubtitleOutlineWidth1080p ?? 2}
+                                onChange={onConfigChange}
+                                label={globalize.translate('LabelBurnInSubtitleOutlineWidth')}
+                                helperText={globalize.translate('LabelBurnInSubtitleOutlineWidthHelp')}
+                                type='number'
+                                slotProps={{
+                                    htmlInput: {
+                                        min: BURN_IN_OUTLINE_MIN,
+                                        max: BURN_IN_OUTLINE_MAX,
+                                        step: 1
+                                    }
+                                }}
+                            />
+```
+
+The `?? 48` / `?? 2` / `?? true` fallbacks only matter against an older server whose JSON lacks the members; they mirror the server defaults so the form never renders an empty number field.
+
+- [ ] **Step 5: Add the strings**
+
+In `src/strings/en-us.json`, directly after the line `"LabelBurnSubtitles": "Burn subtitles",` insert (keep the file's 4-space indentation and trailing commas):
+
+```json
+    "HeaderBurnedInSubtitles": "Burned-in subtitles",
+    "LabelBurnInTextSubtitles": "Burn in text subtitles by default",
+    "LabelBurnInTextSubtitlesHelp": "Render SRT and other text subtitles into the video on the server, so every client (including Chromecast) shows white text with a black outline instead of its own styling. A video transcode is required whenever a text subtitle is selected. Users without video transcoding permission keep the client-rendered subtitles.",
+    "LabelBurnInSubtitleFontSize": "Burned-in subtitle font size",
+    "LabelBurnInSubtitleFontSizeHelp": "Font size in pixels on a 1080p frame, scaled proportionally for other resolutions. 8 to 200, default 48.",
+    "LabelBurnInSubtitleOutlineWidth": "Burned-in subtitle outline width",
+    "LabelBurnInSubtitleOutlineWidthHelp": "Black outline width in pixels on a 1080p frame. 0 to 20, default 2.",
+```
+
+- [ ] **Step 6: Lint and type check**
+
+Run:
+```bash
+npx eslint src/apps/dashboard/routes/playback/transcoding.tsx src/apps/dashboard/features/playback/types/encodingOptions.ts
+npm run build:check
+```
+Expected: no lint output; tsc succeeds.
+
+- [ ] **Step 7: Verify against the rig server**
+
+The server rig (`C:\Users\bru\spare-source\jellyfin`, skill `subtitle-rig`, container `jf-rig` on `http://localhost:18096`) runs the burn-in branch. Build this web client (`npm run build:development`) and point the rig container at it, or open the dashboard from a dev server that proxies to `localhost:18096`. Then:
+
+1. Open Dashboard → Playback → Transcoding. Expected: the three new fields show `true`, `48`, `2`.
+2. Set the font size to `60`, save. Expected: the saved toast; `curl -s -H "Authorization: MediaBrowser Token=<token from tools/subtitle-rig/rig_state.json>" http://localhost:18096/System/Configuration/encoding | grep -o '"BurnInSubtitleFontSize1080p":[0-9]*'` prints `60`.
+3. In the server repo run `python tools/subtitle-rig/cycle.py --resume --expect encode --label web-size-60`. Expected: `MET`, and `podman exec jf-rig sh -c 'grep -o "FontSize=[0-9.]*" /config/log/FFmpeg.Transcode-*.log | tail -1'` prints `FontSize=16` (60 × 288 / 1080). Open `~/.jellyfin-subtitle-rig/captures/web-size-60-native-Embedded.png` and confirm the text is visibly larger than in `tools/subtitle-rig/expected/burnin-native-Embedded.png` of the server repo.
+4. Untick "Burn in text subtitles by default", save, run `--resume --expect external --label web-off`. Expected: `MET`. Re-tick, set the size back to `48`, save.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add src/apps/dashboard/features/playback/types/encodingOptions.ts src/apps/dashboard/routes/playback/transcoding.tsx src/strings/en-us.json
+git commit -m "Add burned-in subtitle settings to the transcoding dashboard page
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 12: Full pass, Pixel 8 viewport check and spec status
 
 **Files:**
 - Modify: `docs/superpowers/specs/2026-09-28-subtitle-ocr-page-design.md` (the `Status:` line)
@@ -3017,7 +3184,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 ```bash
 npm test
-npx eslint src/apps/legacy/features/subtitleOcr src/apps/legacy/routes/subtitleOcr.tsx src/apps/legacy/controllers/itemDetails src/apps/legacy/routes/asyncRoutes src/apps/modern/routes/asyncRoutes
+npx eslint src/apps/legacy/features/subtitleOcr src/apps/legacy/routes/subtitleOcr.tsx src/apps/legacy/controllers/itemDetails src/apps/legacy/routes/asyncRoutes src/apps/modern/routes/asyncRoutes src/apps/dashboard/routes/playback/transcoding.tsx src/apps/dashboard/features/playback/types
 npm run build:check
 npm run build:production
 ```
@@ -3027,7 +3194,7 @@ Expected: all tests pass, no lint output, tsc and the production build succeed.
 - [ ] **Step 2: Pixel 8 viewport manual pass**
 
 In the browser's device emulation, select or enter the Pixel 8 preset (412 × 915 CSS pixels, touch enabled), and run the full flow from the details page button through glyphs and the uncertainty list to the toast and reloaded details page, against the Bitmap movie's English-language PGS track.
-Expected: no horizontal scrolling; the cue image fits the width; candidate buttons wrap; the text field is not focused on load; the Finish button is reachable below the last card. Repeat once at desktop width.
+Expected: no horizontal scrolling; the cue image fits the width; candidate buttons wrap; the text field is not focused on load; the Finish button is reachable below the last card. Repeat once at desktop width. Also open Dashboard → Playback → Transcoding at phone width and confirm the three burned-in subtitle fields stack without overflow.
 
 - [ ] **Step 3: Danish-language pass**
 

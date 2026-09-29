@@ -43,6 +43,7 @@ SRT. Each answer reduces the prompts needed on the next disc.
 | Uncertainty source | New `certain` flag on edits and names in the server API (server spec amended) |
 | Glyph entry | Candidates, free text with hardware keyboard support, italic, skip |
 | Resilience | Job id in the URL; glyph answers re-anchor on shape id after failures |
+| Burn-in settings | Exposed on Dashboard → Playback → Transcoding only (on/off, font size, outline width); no preview, no per-item controls |
 
 ## Verified facts the design relies on
 
@@ -288,6 +289,27 @@ and 11) on 2026-09-29; the server design spec is to follow:
 - `GET /SubtitleOcr/Jobs/{id}/Review` returns both flags. The test client
   shows uncertain items with a `(?)` marker.
 
+### 8. Burned-in subtitle settings (dashboard)
+
+The server branch `feature/subtitle-burn-in-engine` burns text subtitles into
+the video by default and adds three `EncodingOptions` members:
+`BurnInTextSubtitles` (bool, default true), `BurnInSubtitleFontSize1080p`
+(int, 8..200, default 48) and `BurnInSubtitleOutlineWidth1080p` (int, 0..20,
+default 2). The SRTs this page produces are rendered through that path, so
+the administrator needs a place to set the size.
+
+`src/apps/dashboard/routes/playback/transcoding.tsx` gains a "Burned-in
+subtitles" block after the subtitle-extraction checkbox: a checkbox and two
+numeric fields with `min`/`max` matching the server ranges, bound through the
+page's existing state, change handlers and JSON submit. The bundled SDK's
+`EncodingOptions` type predates the members, so a local
+`ExtendedEncodingOptions` intersection type in
+`src/apps/dashboard/features/playback/types/encodingOptions.ts` carries them
+until the SDK is regenerated. The fields fall back to the server defaults when
+an older server omits the members. Validation beyond `min`/`max` is not
+needed: the server clamps out-of-range values to the default and logs a
+warning.
+
 ## Error handling
 
 - **Start fails**: the server's message with Back. A 404 on the start route
@@ -349,3 +371,8 @@ New keys in `src/strings/en-us.json` only: `ConvertSubtitlesToText`,
 `SubtitleOcrFinish`, `SubtitleOcrSaved`, `SubtitleOcrLeaveConfirm`,
 `SubtitleOcrNotSupported`, `SubtitleOcrNothingToConvert`,
 `SubtitleOcrReconnecting`, `SubtitleOcrAdminRequired`.
+
+Burn-in settings (dashboard): `HeaderBurnedInSubtitles`,
+`LabelBurnInTextSubtitles`, `LabelBurnInTextSubtitlesHelp`,
+`LabelBurnInSubtitleFontSize`, `LabelBurnInSubtitleFontSizeHelp`,
+`LabelBurnInSubtitleOutlineWidth`, `LabelBurnInSubtitleOutlineWidthHelp`.
