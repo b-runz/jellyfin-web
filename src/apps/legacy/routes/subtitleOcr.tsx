@@ -86,6 +86,22 @@ const resolveContent = ({
         case 'review':
             if (!review.data || !split) return <Spinner />;
             if (split.autoAccept) {
+                // The server's target is fewer than 1-in-200 lines needing review, so this silent
+                // auto-accept path is the common case: if the Accept call fails, show a retry
+                // affordance instead of leaving an indefinite "Saving" spinner on screen. Retrying
+                // re-posts the same empty-decisions Accept against the existing job; it does not
+                // start a new job.
+                if (accept.isError) {
+                    return (
+                        <JobFailed
+                            job={job}
+                            message={globalize.translate(startErrorMessage(accept.error))}
+                            onRetry={finish}
+                            onBack={goBack}
+                            isRetrying={accept.isPending}
+                        />
+                    );
+                }
                 return (
                     <JobProgress
                         job={job}
@@ -106,7 +122,7 @@ const resolveContent = ({
                     onNamesTextChange={onNamesTextChange}
                     onFinish={finish}
                     isFinishing={accept.isPending}
-                    error={accept.isError ? String((accept.error as Error)?.message || accept.error) : null}
+                    error={accept.isError ? globalize.translate(startErrorMessage(accept.error)) : null}
                 />
             );
         case 'failed':
@@ -119,7 +135,8 @@ const resolveContent = ({
                 />
             );
         default:
-            // done is added in a following task.
+            // Covers 'loading' and 'done': for 'done', the completion effect navigates away
+            // before this would ever render, so a spinner is shown only briefly, if at all.
             return <Spinner />;
     }
 };
@@ -156,8 +173,8 @@ const SubtitleOcr: FC = () => {
     const cancelJob = useCancelJob();
     const { data: job, isError: isJobError, error: jobError } = useJob(jobId);
 
-    // Exactly one eligible track: start without asking. Also gates the lost-job recovery
-    // below, so it must be declared before that effect.
+    // Declared here (rather than beside the effect that sets it, further down) because the
+    // lost-job recovery effect immediately below also needs to reset it.
     const autoStarted = useRef(false);
 
     // The server no longer knows this job (restart discarded it): drop the id and let the normal start flow run.
@@ -224,6 +241,11 @@ const SubtitleOcr: FC = () => {
         // auto-accept effect (below) is not blocked by an error that belongs to a job that
         // is no longer mounted.
         accept.reset();
+        // Clear decisions and names left over from a previous job (e.g. Retry, or the 404
+        // auto-restart), so a new job with zero uncertain lines sends an empty Names array on
+        // auto-accept instead of a stale list from the job before it.
+        setDecisions({});
+        setNamesText('');
         startJob.mutate({
             ItemId: itemId,
             MediaSourceId: track.mediaSourceId,
@@ -231,7 +253,7 @@ const SubtitleOcr: FC = () => {
         }, {
             onSuccess: started => setJobId(started.Id)
         });
-    }, [ accept, itemId, setJobId, startJob ]);
+    }, [ accept, itemId, setJobId, startJob, setDecisions, setNamesText ]);
 
     // Exactly one eligible track: start without asking.
     useEffect(() => {
