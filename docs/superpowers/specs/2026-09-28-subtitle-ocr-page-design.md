@@ -68,6 +68,7 @@ each answer improves the pipeline's next run through its training loop.
 | Crop images | Fetched as authenticated binary requests and shown via object URLs, only for uncertain lines |
 | Resilience | Job id in the URL; a 404 on the job means it is gone and the page starts over |
 | Testing scope | Admin user only, no separate non-admin pass; Pixel 8 viewport (412 × 915); English and Danish tracks both exercised |
+| Burn-in settings | Exposed on Dashboard → Playback → Transcoding only (on/off, font size, outline width); no preview, no per-item controls |
 
 ## Verified facts the design relies on
 
@@ -221,6 +222,28 @@ it when the line is no longer rendered or the component unmounts. This
 replaces the old design's embedded base64 glyph images, which are no longer
 how the server serves images.
 
+### 7. Burned-in subtitle settings (dashboard)
+
+The server branch `feature/subtitle-burn-in-engine` burns text subtitles into
+the video by default and adds three `EncodingOptions` members:
+`BurnInTextSubtitles` (bool, default true), `BurnInSubtitleFontSize1080p`
+(int, 8..200, default 48) and `BurnInSubtitleOutlineWidth1080p` (int, 0..20,
+default 2). The SRTs this page produces are rendered through that path, so
+the administrator needs a place to set the size. This is otherwise unrelated
+to the OCR pipeline change above and unaffected by it.
+
+`src/apps/dashboard/routes/playback/transcoding.tsx` gains a "Burned-in
+subtitles" block after the subtitle-extraction checkbox: a checkbox and two
+numeric fields with `min`/`max` matching the server ranges, bound through the
+page's existing state, change handlers and JSON submit. The bundled SDK's
+`EncodingOptions` type predates the members, so a local
+`ExtendedEncodingOptions` intersection type in
+`src/apps/dashboard/features/playback/types/encodingOptions.ts` carries them
+until the SDK is regenerated. The fields fall back to the server defaults when
+an older server omits the members. Validation beyond `min`/`max` is not
+needed: the server clamps out-of-range values to the default and logs a
+warning.
+
 ## Error handling
 
 - **Start fails** (no admin, server too old, no such stream): the page
@@ -292,3 +315,8 @@ New keys in `src/strings/en-us.json` only: `ConvertSubtitlesToText`,
 `SubtitleOcrReconnecting`, `SubtitleOcrAdminRequired`,
 `SubtitleOcrPickTrack`, `SubtitleOcrConvert`, `SubtitleOcrFailed`,
 `SubtitleOcrRetry`, `SubtitleOcrCropLoadFailed`.
+
+Burn-in settings (dashboard): `HeaderBurnedInSubtitles`,
+`LabelBurnInTextSubtitles`, `LabelBurnInTextSubtitlesHelp`,
+`LabelBurnInSubtitleFontSize`, `LabelBurnInSubtitleFontSizeHelp`,
+`LabelBurnInSubtitleOutlineWidth`, `LabelBurnInSubtitleOutlineWidthHelp`.
