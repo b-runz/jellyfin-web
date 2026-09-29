@@ -143,7 +143,7 @@ languages as equal. Result order follows the media source and stream order.
 | Job in `AwaitingGlyph` | `GlyphPrompt` |
 | Job in `AwaitingReview`, uncertain items present | `UncertaintyPrompt` |
 | Job in `AwaitingReview`, nothing uncertain | Accept is posted; `JobProgress` shows "Saving" |
-| Job `Done` | Toast "Subtitles saved", invalidate item queries, navigate back |
+| Job `Done` | Toast "Subtitles saved" with `SavedCues`, invalidate item queries, navigate back |
 | Job `Failed` | `JobFailed` with the message and Retry |
 
 When a job starts, `jobId` is written into the URL with `replace`, so a
@@ -153,29 +153,34 @@ track.
 
 ### 4. Feature folder `src/apps/legacy/features/subtitleOcr/`
 
-**`types/`** mirrors the server API:
+**`types/`** mirrors the server records from the server plan (Task 9 and
+Task 10). Jellyfin serialises them in PascalCase, like every other route the
+web client consumes:
 
 ```ts
 type JobState = 'Extracting' | 'Recognising' | 'AwaitingGlyph' | 'Correcting'
     | 'AwaitingReview' | 'Done' | 'Failed' | 'Cancelled';
 
-interface OcrJob { id: string; state: JobState; cuesDone: number; cuesTotal: number;
-    questionsRemaining: number; error?: string | null; }
+interface OcrJob { Id: string; ItemId: string; MediaSourceId: string; StreamIndex: number;
+    State: JobState; CuesDone: number; CuesTotal: number; QuestionsRemaining: number;
+    Error?: string | null; Warning?: string | null; }
 
-interface GlyphQuestion { shapeId: string; letterPng: string; cuePng: string;
-    bounds: { x: number; y: number; width: number; height: number };
-    candidates: string[]; remaining: number; }
+interface GlyphQuestion { ShapeId: string; CueIndex: number; LetterPngBase64: string;
+    CuePngBase64: string; Left: number; Top: number; Width: number; Height: number;
+    Candidates: string[]; Remaining: number; Occurrences: number; }
 
-interface GlyphAnswer { shapeId: string; text?: string; italic?: boolean; skip?: boolean; }
+interface StartJobRequest { ItemId: string; MediaSourceId: string; StreamIndex: number; }
+interface GlyphAnswer { ShapeId: string; Text?: string | null; Italic: boolean; Skip: boolean; }
 
-interface ReviewCue { index: number; start: string; end: string; text: string; }
-interface ReviewEdit { id: string; cueIndex: number; original: string; corrected: string;
-    reason: string; certain: boolean; }
-interface DetectedName { name: string; cueIndex: number; certain: boolean; }
-interface Review { cues: ReviewCue[]; edits: ReviewEdit[]; detectedNames: DetectedName[];
-    correctorError?: string | null; }
+interface ReviewCue { Index: number; Start: string; End: string; Text: string; }
+interface ReviewEdit { Id: number; CueIndex: number; Original: string; Corrected: string;
+    Reason: string; Certain: boolean; }
+interface DetectedName { Name: string; CueIndex: number; Certain: boolean; }
+interface Review { Cues: ReviewCue[]; Edits: ReviewEdit[]; DetectedNames: DetectedName[];
+    CorrectorError?: string | null; }
 
-interface AcceptRequest { rejectedEditIds: string[]; names: string[]; neverAsk: string[]; }
+interface AcceptRequest { RejectedEditIds: number[]; Names: string[]; NeverAsk: string[]; }
+interface AcceptResult { SavedCues: number; }
 ```
 
 **`constants/`**: `QUERY_KEY = 'SubtitleOcr'`, `PROGRESS_STATES`,
@@ -222,13 +227,16 @@ answer also invalidates the glyph key.
   `cuesDone / cuesTotal` during recognition, and "N shapes need your help"
   when `questionsRemaining > 0`. Shows a small "Reconnecting" chip when the
   last poll failed. A Cancel button cancels the job and navigates back.
-- `GlyphPrompt`: cue image with the letter bounds drawn on a canvas overlay,
+- `GlyphPrompt`: cue image with the letter bounds (`Left`, `Top`, `Width`,
+  `Height`) drawn on a canvas overlay,
   the letter enlarged below it, up to five candidate buttons, a text field,
   an italic checkbox, Skip, and a "N remaining" counter. Enter or a candidate
   tap submits. Focus rules: the field is auto-focused on desktop and TV
   layouts; on touch layouts it is not, but a `keydown` listener on the prompt
   forwards printable keys to the field so a hardware keyboard works without a
-  tap. Images are shown through `data:image/png;base64,` URLs.
+  tap. Images are shown through `data:image/png;base64,` URLs built from
+  `LetterPngBase64` and `CuePngBase64`. `Occurrences` is shown next to the
+  remaining counter ("used in 12 cues").
 - `UncertaintyPrompt`: one list in server order of `EditCard` and `NameCard`.
   `EditCard` shows the cue text rendered with `wordDiff`, the reason, Accept
   and Reject; Reject reveals "Never ask about this word again", checked by
@@ -266,15 +274,19 @@ job or queue moved on.
 The server design gains a certainty flag so the page can prompt only on
 uncertainty:
 
-- `CorrectionEdit` gains `bool Certain`.
+Applied to the server implementation plan
+(`docs/superpowers/plans/2026-09-28-bitmap-subtitle-ocr.md`, Tasks 7 to 9
+and 11) on 2026-09-29; the server design spec is to follow:
+
+- `CorrectionEdit` and `ReviewEdit` gain `bool Certain`.
 - `DetectedNames` becomes `IReadOnlyList<DetectedName>` with
   `DetectedName(string Name, int CueIndex, bool Certain)`.
 - The Gemini prompt asks the model to mark each edit and name `certain` when
   it is an unambiguous OCR or spelling fix or a name that appears
   consistently, and `uncertain` otherwise. The structured-output schema
-  carries the flag.
+  carries the flag. A missing flag is read as uncertain.
 - `GET /SubtitleOcr/Jobs/{id}/Review` returns both flags. The test client
-  ignores them, so it is unchanged.
+  shows uncertain items with a `(?)` marker.
 
 ## Error handling
 
@@ -289,8 +301,8 @@ uncertainty:
 - **Corrector error**: notice line in `UncertaintyPrompt`, or a toast when
   auto-accepting. Acceptance is never blocked.
 - **Accept fails**: error with Retry; answers stay in component state.
-- **Job `error` set while still active** (glyph memory save warning): a
-  dismissible notice, not an error state.
+- **Job `Warning` set** (glyph memory save failure): a dismissible notice,
+  not an error state. `Error` is only set on `Failed`.
 - **Not an administrator**: toast and redirect to home.
 
 ## Testing
