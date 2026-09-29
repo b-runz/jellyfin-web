@@ -57,6 +57,20 @@ describe('wordDiff', () => {
             { text: 'three', kind: 'added' }
         ]);
     });
+
+    it('merges multiple words removed at the tail into one removed segment', () => {
+        expect(wordDiff('a b c', 'a')).toEqual([
+            { text: 'a ', kind: 'same' },
+            { text: 'b c', kind: 'removed' }
+        ]);
+    });
+
+    it('merges three or more words removed at the tail into one removed segment', () => {
+        expect(wordDiff('a b c d', 'a')).toEqual([
+            { text: 'a ', kind: 'same' },
+            { text: 'b c d', kind: 'removed' }
+        ]);
+    });
 });
 
 describe('changedWords', () => {

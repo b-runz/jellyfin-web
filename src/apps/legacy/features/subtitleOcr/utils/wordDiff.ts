@@ -75,7 +75,9 @@ export const wordDiff = (original: string, corrected: string): DiffSegment[] => 
             pushChanged(segments, b[j].word, 'added');
             j++;
         } else {
-            if (j >= b.length || segments.length === 0 || segments[segments.length - 1].kind === 'same') {
+            // Mirrors the added-branch guard: only emit leading whitespace when starting a fresh run, not
+            // when continuing a removed run that has run past the end of the corrected text.
+            if (segments.length === 0 || segments[segments.length - 1].kind === 'same') {
                 push(segments, a[i].leading, 'same');
             }
             pushChanged(segments, a[i].word, 'removed');
