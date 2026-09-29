@@ -1,7 +1,7 @@
 # Subtitle OCR page — design
 
 Date: 2026-09-28, revised 2026-09-29
-Status: implemented on branch feature/subtitle-ocr-page
+Status: implemented on branch feature/subtitle-ocr-page; manual/browser verification pending
 Server side: `jellyfin/docs/superpowers/specs/2026-09-29-subtitle-ocr-scoring-pipeline-design.md`
 (supersedes `jellyfin/docs/superpowers/specs/2026-09-28-bitmap-subtitle-ocr-design.md`,
 which this page's first revision was written against)
