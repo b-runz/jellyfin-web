@@ -66,8 +66,15 @@ const UncertainLineCard: FC<UncertainLineCardProps> = ({ jobId, line, decision, 
     }, [ submit, text ]);
 
     const onTextChange = useCallback((event: ChangeEvent<HTMLInputElement>) => {
-        setText(event.target.value);
-    }, []);
+        const value = event.target.value;
+        setText(value);
+        // Treat typing itself as continuously updating the decision, so an edit made after
+        // tapping a candidate (without pressing OK again) is not silently dropped: the decision
+        // always reflects what's currently visible in the field once the user has touched it.
+        if (value) {
+            onDecide(value);
+        }
+    }, [ onDecide ]);
 
     return (
         <Card variant='outlined'>
@@ -77,9 +84,10 @@ const UncertainLineCard: FC<UncertainLineCardProps> = ({ jobId, line, decision, 
 
                     {line.Candidates.length > 0 && (
                         <Stack direction='row' spacing={1} flexWrap='wrap' useFlexGap>
-                            {line.Candidates.map(candidate => (
+                            {line.Candidates.map((candidate, index) => (
                                 <Button
-                                    key={candidate.Text}
+                                    // eslint-disable-next-line react/no-array-index-key -- candidate.Text alone can collide; index disambiguates
+                                    key={`${candidate.Text}-${index}`}
                                     variant={decision === candidate.Text ? 'contained' : 'outlined'}
                                     // eslint-disable-next-line react/jsx-no-bind
                                     onClick={() => {
