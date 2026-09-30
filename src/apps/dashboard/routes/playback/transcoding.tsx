@@ -21,7 +21,7 @@ import Alert from '@mui/material/Alert';
 import Button from '@mui/material/Button';
 import { type ActionFunctionArgs, Form, useActionData, useNavigation, useSubmit } from 'react-router-dom';
 import { QUERY_KEY, useNamedConfiguration } from 'hooks/useNamedConfiguration';
-import type { EncodingOptions } from '@jellyfin/sdk/lib/generated-client/models/encoding-options';
+import { BURN_IN_FONT_SIZE_MAX, BURN_IN_FONT_SIZE_MIN, BURN_IN_OUTLINE_MAX, BURN_IN_OUTLINE_MIN, type ExtendedEncodingOptions } from 'apps/dashboard/features/playback/types/encodingOptions';
 import { HardwareAccelerationType } from '@jellyfin/sdk/lib/generated-client/models/hardware-acceleration-type';
 import { ServerConnections } from 'lib/jellyfin-apiclient';
 import { getSystemApi } from '@jellyfin/sdk/lib/utils/api/system-api';
@@ -36,7 +36,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const api = ServerConnections.getApi();
     if (!api) throw new Error('No Api instance available');
 
-    const data = await request.json() as EncodingOptions;
+    const data = await request.json() as ExtendedEncodingOptions;
 
     await getSystemApi(api)
         .updateNamedConfiguration({ key: CONFIG_KEY, body: data });
@@ -51,8 +51,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 };
 
 export const Component = () => {
-    const { data: initialConfig, isPending, isError } = useNamedConfiguration<EncodingOptions>(CONFIG_KEY);
-    const [ config, setConfig ] = useState<EncodingOptions | null>(null);
+    const { data: initialConfig, isPending, isError } = useNamedConfiguration<ExtendedEncodingOptions>(CONFIG_KEY);
+    const [ config, setConfig ] = useState<ExtendedEncodingOptions | null>(null);
     const navigation = useNavigation();
     const actionData = useActionData() as ActionData | undefined;
     const submit = useSubmit();
@@ -835,6 +835,54 @@ export const Component = () => {
                                 />
                                 <FormHelperText>{globalize.translate('AllowOnTheFlySubtitleExtractionHelp')}</FormHelperText>
                             </FormControl>
+
+                            <Typography variant='h3'>{globalize.translate('HeaderBurnedInSubtitles')}</Typography>
+
+                            <FormControl>
+                                <FormControlLabel
+                                    label={globalize.translate('LabelBurnInTextSubtitles')}
+                                    control={
+                                        <Checkbox
+                                            name='BurnInTextSubtitles'
+                                            checked={config.BurnInTextSubtitles ?? true}
+                                            onChange={onCheckboxChange}
+                                        />
+                                    }
+                                />
+                                <FormHelperText>{globalize.translate('LabelBurnInTextSubtitlesHelp')}</FormHelperText>
+                            </FormControl>
+
+                            <TextField
+                                name='BurnInSubtitleFontSize1080p'
+                                value={config.BurnInSubtitleFontSize1080p ?? 48}
+                                onChange={onConfigChange}
+                                label={globalize.translate('LabelBurnInSubtitleFontSize')}
+                                helperText={globalize.translate('LabelBurnInSubtitleFontSizeHelp')}
+                                type='number'
+                                slotProps={{
+                                    htmlInput: {
+                                        min: BURN_IN_FONT_SIZE_MIN,
+                                        max: BURN_IN_FONT_SIZE_MAX,
+                                        step: 1
+                                    }
+                                }}
+                            />
+
+                            <TextField
+                                name='BurnInSubtitleOutlineWidth1080p'
+                                value={config.BurnInSubtitleOutlineWidth1080p ?? 2}
+                                onChange={onConfigChange}
+                                label={globalize.translate('LabelBurnInSubtitleOutlineWidth')}
+                                helperText={globalize.translate('LabelBurnInSubtitleOutlineWidthHelp')}
+                                type='number'
+                                slotProps={{
+                                    htmlInput: {
+                                        min: BURN_IN_OUTLINE_MIN,
+                                        max: BURN_IN_OUTLINE_MAX,
+                                        step: 1
+                                    }
+                                }}
+                            />
 
                             <FormControl>
                                 <FormControlLabel
