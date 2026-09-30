@@ -102,7 +102,7 @@ const pushChanged = (segments: DiffSegment[], word: string, kind: 'removed' | 'a
 // æ/ø/å and other Latin-diacritic letters) so punctuation can be stripped without the `u` flag, which
 // TypeScript disallows when compiling against the ES5 target this repo uses.
 // eslint-disable-next-line sonarjs/slow-regex
-const stripPunctuation = (word: string) => word.replace(/^[^a-zA-Z0-9À-ɏ]+|[^a-zA-Z0-9À-ɏ]+$/g, '');
+export const stripPunctuation = (word: string) => word.replace(/^[^a-zA-Z0-9À-ɏ]+|[^a-zA-Z0-9À-ɏ]+$/g, '');
 
 /**
  * Words the corrector changed, used for the "never ask again" default. Removed words come first;

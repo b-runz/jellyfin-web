@@ -47,3 +47,23 @@ export const parseNames = (text: string): string[] => {
 
     return names;
 };
+
+/**
+ * Adds `name` to the comma-separated names text if it is not already there, or removes it if it
+ * is: the toggle a tapped word in the review performs, so tagging a name from the review's own
+ * text never requires typing it into the names field by hand.
+ */
+export const toggleName = (namesText: string, name: string): string => {
+    const trimmed = name.trim();
+    if (!trimmed) return namesText;
+
+    const names = parseNames(namesText);
+    const index = names.indexOf(trimmed);
+    if (index === -1) {
+        names.push(trimmed);
+    } else {
+        names.splice(index, 1);
+    }
+
+    return names.join(', ');
+};

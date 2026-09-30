@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { Review, ReviewLine } from '../types';
-import { buildAcceptRequest, isReviewComplete, parseNames, splitReview } from './review';
+import { buildAcceptRequest, isReviewComplete, parseNames, splitReview, toggleName } from './review';
 
 const line = (index: number, certainty: ReviewLine['Certainty'], ocrText = 'l am here', chosenText = 'I am here'): ReviewLine => ({
     Index: index,
@@ -94,5 +94,28 @@ describe('parseNames', () => {
     it('returns an empty list for blank input', () => {
         expect(parseNames('')).toEqual([]);
         expect(parseNames('   ')).toEqual([]);
+    });
+});
+
+describe('toggleName', () => {
+    it('appends a name to an empty list', () => {
+        expect(toggleName('', 'Anakin')).toBe('Anakin');
+    });
+
+    it('appends a name to an existing comma-separated list', () => {
+        expect(toggleName('Padme', 'Anakin')).toBe('Padme, Anakin');
+    });
+
+    it('removes a name that is already present', () => {
+        expect(toggleName('Padme, Anakin', 'Anakin')).toBe('Padme');
+    });
+
+    it('is a no-op for blank input', () => {
+        expect(toggleName('Padme', '')).toBe('Padme');
+        expect(toggleName('Padme', '   ')).toBe('Padme');
+    });
+
+    it('matches against the existing list ignoring stray whitespace, same as parseNames', () => {
+        expect(toggleName(' Anakin ,Padme', 'Anakin')).toBe('Padme');
     });
 });

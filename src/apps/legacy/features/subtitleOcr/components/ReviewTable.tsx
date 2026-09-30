@@ -3,12 +3,12 @@ import Button from '@mui/material/Button';
 import Stack from '@mui/material/Stack';
 import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
-import React, { type ChangeEvent, type FC, useCallback } from 'react';
+import React, { type ChangeEvent, type FC, useCallback, useMemo } from 'react';
 
 import globalize from 'lib/globalize';
 
 import type { Review } from '../types';
-import { isReviewComplete, splitReview } from '../utils/review';
+import { isReviewComplete, parseNames, splitReview } from '../utils/review';
 import ResolvedLinesList from './ResolvedLinesList';
 import UncertainLineCard from './UncertainLineCard';
 
@@ -20,6 +20,8 @@ interface ReviewTableProps {
     onDecide: (index: number, text: string) => void;
     namesText: string;
     onNamesTextChange: (value: string) => void;
+    /** Tags or un-tags a word as a name to remember, from a tap in an uncertain line's card. */
+    onToggleName: (word: string) => void;
     onFinish: () => void;
     isFinishing: boolean;
     /** Error from a failed Accept; decisions and names stay so the user can retry. */
@@ -27,9 +29,10 @@ interface ReviewTableProps {
 }
 
 const ReviewTable: FC<ReviewTableProps> = ({
-    jobId, review, decisions, onDecide, namesText, onNamesTextChange, onFinish, isFinishing, error
+    jobId, review, decisions, onDecide, namesText, onNamesTextChange, onToggleName, onFinish, isFinishing, error
 }) => {
     const split = splitReview(review);
+    const names = useMemo(() => parseNames(namesText), [ namesText ]);
 
     const onNamesChange = useCallback((event: ChangeEvent<HTMLInputElement>) => {
         onNamesTextChange(event.target.value);
@@ -47,6 +50,8 @@ const ReviewTable: FC<ReviewTableProps> = ({
                     decision={decisions[line.Index]}
                     // eslint-disable-next-line react/jsx-no-bind
                     onDecide={text => onDecide(line.Index, text)}
+                    names={names}
+                    onToggleName={onToggleName}
                 />
             ))}
 

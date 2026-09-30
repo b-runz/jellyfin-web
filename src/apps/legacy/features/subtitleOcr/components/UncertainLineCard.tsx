@@ -4,12 +4,13 @@ import CardContent from '@mui/material/CardContent';
 import Stack from '@mui/material/Stack';
 import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
-import React, { type ChangeEvent, type FC, type FormEvent, useCallback, useEffect, useRef, useState } from 'react';
+import React, { type ChangeEvent, type FC, type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import layoutManager from 'components/layoutManager';
 import globalize from 'lib/globalize';
 
 import type { ReviewLine } from '../types';
+import { stripPunctuation } from '../utils/wordDiff';
 import LineCropImage from './LineCropImage';
 
 interface UncertainLineCardProps {
@@ -18,6 +19,10 @@ interface UncertainLineCardProps {
     /** The text the user has picked or typed for this line so far, if any. */
     decision?: string;
     onDecide: (text: string) => void;
+    /** Already-tagged names, so a word matching one of them renders as marked. */
+    names: string[];
+    /** Tags or un-tags a word as a name to remember, without the user typing it into the names field. */
+    onToggleName: (word: string) => void;
 }
 
 /**
@@ -25,7 +30,7 @@ interface UncertainLineCardProps {
  * the direct successor of the old per-glyph picker, operating on a whole line's text instead of one
  * letter shape.
  */
-const UncertainLineCard: FC<UncertainLineCardProps> = ({ jobId, line, decision, onDecide }) => {
+const UncertainLineCard: FC<UncertainLineCardProps> = ({ jobId, line, decision, onDecide, names, onToggleName }) => {
     const [ text, setText ] = useState(decision ?? '');
     const inputRef = useRef<HTMLInputElement>(null);
     const useHardwareKeyboardFocus = !layoutManager.mobile;
@@ -76,6 +81,11 @@ const UncertainLineCard: FC<UncertainLineCardProps> = ({ jobId, line, decision, 
         }
     }, [ onDecide ]);
 
+    // Words of the currently displayed text, tappable to tag one as a name instead of typing it
+    // into the names field. Only shown once there's something to tag, i.e. after a candidate is
+    // picked or a correction is typed.
+    const words = useMemo(() => text.trim().split(/\s+/).filter(Boolean), [ text ]);
+
     return (
         <Card variant='outlined'>
             <CardContent>
@@ -123,6 +133,32 @@ const UncertainLineCard: FC<UncertainLineCardProps> = ({ jobId, line, decision, 
                             </Button>
                         </Stack>
                     </form>
+
+                    {words.length > 0 && (
+                        <Stack direction='row' spacing={0.5} flexWrap='wrap' useFlexGap alignItems='center'>
+                            <Typography variant='caption' color='text.secondary' sx={{ mr: 0.5 }}>
+                                {globalize.translate('SubtitleOcrTapNameHint')}
+                            </Typography>
+                            {words.map((word, index) => {
+                                const clean = stripPunctuation(word);
+                                const isNamed = clean !== '' && names.includes(clean);
+                                return (
+                                    <Button
+                                        // eslint-disable-next-line react/no-array-index-key -- words can repeat within a line; index disambiguates
+                                        key={`${word}-${index}`}
+                                        size='small'
+                                        variant={isNamed ? 'contained' : 'text'}
+                                        disabled={!clean}
+                                        // eslint-disable-next-line react/jsx-no-bind
+                                        onClick={() => onToggleName(clean)}
+                                        sx={{ minWidth: 0, textTransform: 'none', px: 1 }}
+                                    >
+                                        {word}
+                                    </Button>
+                                );
+                            })}
+                        </Stack>
+                    )}
 
                     {decision !== undefined && (
                         <Typography variant='body2' color='text.secondary'>{decision}</Typography>

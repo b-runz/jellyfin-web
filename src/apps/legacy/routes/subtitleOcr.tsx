@@ -20,7 +20,7 @@ import type { EligibleTrack, OcrJob } from 'apps/legacy/features/subtitleOcr/typ
 import { eligibleTracks } from 'apps/legacy/features/subtitleOcr/utils/eligibleTracks';
 import { nextStepAfterJobError, startErrorMessage } from 'apps/legacy/features/subtitleOcr/utils/errors';
 import { type Phase, isJobActive, phaseFor } from 'apps/legacy/features/subtitleOcr/utils/phase';
-import { buildAcceptRequest, type SplitReview, splitReview } from 'apps/legacy/features/subtitleOcr/utils/review';
+import { buildAcceptRequest, type SplitReview, splitReview, toggleName } from 'apps/legacy/features/subtitleOcr/utils/review';
 import Page from 'components/Page';
 import toast from 'components/toast/toast';
 import { useApi } from 'hooks/useApi';
@@ -46,6 +46,7 @@ interface ContentArgs {
     start: (track: EligibleTrack) => void;
     onDecide: (index: number, text: string) => void;
     onNamesTextChange: (text: string) => void;
+    onToggleName: (word: string) => void;
     finish: () => void;
     onCancelClick: () => void;
     retry: () => void;
@@ -55,7 +56,7 @@ interface ContentArgs {
 /** Picks the content for the current phase, short-circuiting to the failure view for a failed start. */
 const resolveContent = ({
     startJob, cancelJob, phase, tracks, job, isJobError, review, split, jobId,
-    decisions, namesText, accept, start, onDecide, onNamesTextChange, finish, onCancelClick, retry, goBack
+    decisions, namesText, accept, start, onDecide, onNamesTextChange, onToggleName, finish, onCancelClick, retry, goBack
 // eslint-disable-next-line sonarjs/function-return-type -- genuinely returns a mix of JSX nodes across phases
 }: ContentArgs): ReactNode => {
     if (startJob.isError) {
@@ -120,6 +121,7 @@ const resolveContent = ({
                     onDecide={onDecide}
                     namesText={namesText}
                     onNamesTextChange={onNamesTextChange}
+                    onToggleName={onToggleName}
                     onFinish={finish}
                     isFinishing={accept.isPending}
                     error={accept.isError ? globalize.translate(startErrorMessage(accept.error)) : null}
@@ -185,6 +187,26 @@ const SubtitleOcr: FC = () => {
         }
     }, [ isJobError, jobError, setJobId ]);
 
+    const cancelCurrentJob = useCallback(async () => {
+        if (jobId && isJobActive(job?.State)) {
+            await cancelJob.mutateAsync(jobId).catch(() => undefined);
+        }
+    }, [ cancelJob, job?.State, jobId ]);
+
+    // Set once the user chose to cancel, so the leave guard does not ask again while the
+    // cached job state is still active and the page navigates away.
+    const [ isLeaving, setIsLeaving ] = useState(false);
+
+    // `useBlocker` (inside useLeaveGuard) only updates the router's actual blocking predicate
+    // in a useEffect, not synchronously during render, so by the time THIS effect re-runs with
+    // a fresh (non-blocking) predicate, any navigate()-triggering effect declared earlier in
+    // this component would already have fired against the router's stale, still-blocking
+    // predicate from the previous render. useLeaveGuard is therefore called here, before every
+    // effect below that can call navigate() (the completion effect and the admin-redirect
+    // effect), so its blocker registration is always the first of this component's effects to
+    // run in a given commit and is never stale when those later effects execute.
+    useLeaveGuard(!!jobId && isJobActive(job?.State) && !isLeaving, cancelCurrentJob);
+
     const isReviewPhase = job?.State === 'AwaitingReview';
     const review = useReview(jobId, isReviewPhase);
     const accept = useAccept(jobId);
@@ -194,6 +216,10 @@ const SubtitleOcr: FC = () => {
 
     const onDecide = useCallback((index: number, text: string) => {
         setDecisions(prev => ({ ...prev, [index]: text }));
+    }, []);
+
+    const onToggleName = useCallback((word: string) => {
+        setNamesText(prev => toggleName(prev, word));
     }, []);
 
     const finish = useCallback(() => {
@@ -273,22 +299,10 @@ const SubtitleOcr: FC = () => {
         start(track);
     }, [ job?.MediaSourceId, job?.StreamIndex, setJobId, start, startJob, tracks ]);
 
-    const cancelCurrentJob = useCallback(async () => {
-        if (jobId && isJobActive(job?.State)) {
-            await cancelJob.mutateAsync(jobId).catch(() => undefined);
-        }
-    }, [ cancelJob, job?.State, jobId ]);
-
-    // Set once the user chose to cancel, so the leave guard does not ask again while the
-    // cached job state is still active and the page navigates away.
-    const [ isLeaving, setIsLeaving ] = useState(false);
-
     const onCancelClick = useCallback(() => {
         setIsLeaving(true);
         cancelCurrentJob().then(goBack).catch(() => { /* no-op: cancelCurrentJob already swallows errors */ });
     }, [ cancelCurrentJob, goBack ]);
-
-    useLeaveGuard(!!jobId && isJobActive(job?.State) && !isLeaving, cancelCurrentJob);
 
     const phase = phaseFor({ hasJobId: !!jobId, job, trackCount: tracks.length, itemLoaded: !!user && !isItemPending && !!item });
 
@@ -308,6 +322,7 @@ const SubtitleOcr: FC = () => {
         start,
         onDecide,
         onNamesTextChange: setNamesText,
+        onToggleName,
         finish,
         onCancelClick,
         retry,
